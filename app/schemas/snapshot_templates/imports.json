@@ -1,0 +1,11 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Dependency analysis, external library tracking",
+  "fields": {
+    "code.imports.modules": [],
+    "code.imports.from_files": [],
+    "code.imports.external": [],
+    "code.imports.internal": []
+  },
+  "always_create": false
+}

@@ -1,0 +1,12 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "OOP structure, inheritance analysis, method discovery",
+  "fields": {
+    "code.classes.names": [],
+    "code.classes.inheritance": [],
+    "code.classes.methods": [],
+    "code.classes.properties": [],
+    "code.classes.interfaces": []
+  },
+  "always_create": false
+}

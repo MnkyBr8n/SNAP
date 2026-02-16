@@ -1,0 +1,13 @@
+{
+  "parser": "text_extractor",
+  "use_case": "Content extraction, concept discovery, reference tracking",
+  "fields": {
+    "doc.summary": null,
+    "doc.key_concepts": [],
+    "doc.technical_terms": [],
+    "doc.acronyms": [],
+    "doc.urls": [],
+    "doc.code_snippets": []
+  },
+  "always_create": true
+}

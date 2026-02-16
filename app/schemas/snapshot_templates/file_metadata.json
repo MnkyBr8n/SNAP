@@ -1,0 +1,11 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "File identification, language detection, size tracking",
+  "fields": {
+    "code.file.path": null,
+    "code.file.language": null,
+    "code.file.loc": null,
+    "code.file.package": null
+  },
+  "always_create": true
+}

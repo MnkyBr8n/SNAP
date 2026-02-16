@@ -1,0 +1,39 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: snap-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-snap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-snap}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-snap}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  snap:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: snap-tool
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SNAP_POSTGRES_DSN: postgresql+psycopg://${POSTGRES_USER:-snap}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snap}
+      SNAP_LOG_LEVEL: ${SNAP_LOG_LEVEL:-INFO}
+      SNAP_ENVIRONMENT: ${SNAP_ENVIRONMENT:-production}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    command: ["python", "-m", "app.mcp.run", "--sse", "--host", "0.0.0.0", "--port", "8080"]
+
+volumes:
+  postgres_data:

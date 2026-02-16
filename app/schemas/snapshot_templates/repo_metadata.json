@@ -1,0 +1,12 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Repository-level analysis, project structure overview",
+  "fields": {
+    "repo.primary_language": null,
+    "repo.entrypoints": [],
+    "repo.modules": [],
+    "repo.test_framework": null,
+    "repo.ci_pipeline": null
+  },
+  "always_create": false
+}

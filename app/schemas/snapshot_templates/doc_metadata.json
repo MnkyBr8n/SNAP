@@ -1,0 +1,12 @@
+{
+  "parser": "text_extractor",
+  "use_case": "Document identification, versioning, authorship tracking",
+  "fields": {
+    "doc.title": null,
+    "doc.author": null,
+    "doc.date": null,
+    "doc.version": null,
+    "doc.language": null
+  },
+  "always_create": true
+}

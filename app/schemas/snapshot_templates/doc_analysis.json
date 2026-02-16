@@ -1,0 +1,17 @@
+{
+  "parser": "text_extractor",
+  "use_case": "Requirements analysis, decision tracking, risk identification",
+  "fields": {
+    "doc.key_requirements": [],
+    "doc.entities": [],
+    "doc.references": [],
+    "doc.related_files": [],
+    "doc.api_endpoints": [],
+    "doc.open_questions": [],
+    "doc.risks": [],
+    "doc.decisions": [],
+    "doc.assumptions": [],
+    "doc.constraints": []
+  },
+  "always_create": false
+}

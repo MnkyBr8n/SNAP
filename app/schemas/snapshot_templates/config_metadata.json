@@ -1,0 +1,17 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Configuration file structure and settings analysis for LLM context enrichment",
+  "fields": {
+    "config.file.path": null,
+    "config.file.format": null,
+    "config.structure.toplevel_keys": [],
+    "config.structure.nested_paths": [],
+    "config.structure.depth": 0,
+    "config.settings.parameter_names": [],
+    "config.settings.env_vars": [],
+    "config.database.connection_strings": [],
+    "config.api.endpoints": [],
+    "config.api.hosts": []
+  },
+  "always_create": false
+}

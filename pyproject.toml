@@ -1,0 +1,79 @@
+[project]
+name = "snap"
+version = "0.1.0"
+description = "SNAP - Snapshot Notebook Abide Persistence"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.0",
+    "PyYAML>=6.0",
+    "flask>=3.0",
+    "starlette>=0.27",
+    "uvicorn>=0.23",
+    "mcp>=1.0",
+    "tree-sitter>=0.22",
+    "tree-sitter-python>=0.21",
+    "tree-sitter-javascript>=0.21",
+    "tree-sitter-typescript>=0.21",
+    "tree-sitter-java>=0.21",
+    "tree-sitter-go>=0.21",
+    "tree-sitter-rust>=0.21",
+    "tree-sitter-c>=0.21",
+    "tree-sitter-cpp>=0.21",
+    "tree-sitter-c-sharp>=0.21",
+    "tree-sitter-ruby>=0.21",
+    "tree-sitter-php>=0.21",
+    "tree-sitter-swift",
+    "tree-sitter-kotlin",
+    "tree-sitter-scala",
+    "tree-sitter-json>=0.21",
+    "tree-sitter-yaml>=0.5",
+    "tree-sitter-xml>=0.6",
+    "pypdf>=4.0",
+    "python-docx>=1.0",
+    "beautifulsoup4>=4.12",
+    "semgrep",
+    "pyjwt>=2.8",
+    "httpx>=0.25",
+    "defusedxml>=0.7",
+]
+
+[project.scripts]
+snap-admin = "app.admin:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app", "app.*"]
+
+[tool.pylint.main]
+extension-pkg-whitelist = ["pydantic"]
+
+[tool.pylint.messages_control]
+disable = [
+    "no-member",                    # False positives with Pydantic
+    "missing-function-docstring",   # Style preference
+    "missing-class-docstring",      # Style preference
+    "trailing-whitespace",          # Auto-fixable
+    "line-too-long",                # Style preference
+    "wrong-import-order",           # Auto-fixable
+    "invalid-name",                 # Style preference for constants
+    "import-outside-toplevel",      # Intentional lazy imports
+    "no-name-in-module",            # False positives with MCP library
+    "import-self",                  # False positive: app/mcp/server.py != mcp.server
+]
+
+[tool.pylint.format]
+max-line-length = 120

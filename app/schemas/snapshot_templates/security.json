@@ -1,0 +1,11 @@
+{
+  "parser": "semgrep",
+  "use_case": "Security audit, vulnerability tracking, secret detection",
+  "fields": {
+    "code.security.vulnerabilities": [],
+    "code.security.hardcoded_secrets": [],
+    "code.security.sql_injection_risks": [],
+    "code.security.xss_risks": []
+  },
+  "always_create": true
+}

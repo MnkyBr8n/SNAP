@@ -1,0 +1,14 @@
+{
+  "parser": "csv_parser",
+  "use_case": "Schema discovery, data profiling, type inference, semantic analysis",
+  "fields": {
+    "csv.schema.column_names": [],
+    "csv.schema.column_types": [],
+    "csv.schema.column_count": 0,
+    "csv.stats.row_count": 0,
+    "csv.stats.null_counts": {},
+    "csv.stats.unique_counts": {},
+    "csv.sample.first_rows": []
+  },
+  "always_create": true
+}

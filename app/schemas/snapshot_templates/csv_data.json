@@ -1,0 +1,10 @@
+{
+  "parser": "csv_parser",
+  "use_case": "Raw table data storage, data reconstruction, row-level access",
+  "fields": {
+    "csv.file.path": null,
+    "csv.file.rows": 0,
+    "csv.table_data": {}
+  },
+  "always_create": true
+}
