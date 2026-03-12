@@ -24,6 +24,115 @@ class SnapshotBuilderError(Exception):
     pass
 
 
+def compute_simhash(text: str, hash_bits: int = 64) -> str:
+    """
+    Compute SimHash for fast similarity detection.
+
+    Args:
+        text: Input text to hash
+        hash_bits: Number of bits in hash (default 64)
+
+    Returns:
+        Hex string representation of SimHash (16 chars for 64-bit)
+    """
+    import hashlib
+    import re
+
+    # Tokenize (simple whitespace + alphanumeric)
+    tokens = re.findall(r'\w+', text.lower())
+    if not tokens:
+        return "0" * 16
+
+    # Initialize bit vector
+    v = [0] * hash_bits
+
+    # For each token, hash and update bit vector
+    for token in tokens:
+        # Hash token to get bit pattern
+        h = hashlib.md5(token.encode()).digest()
+
+        # Convert bytes to bits and update vector
+        for i in range(hash_bits):
+            byte_idx = i // 8
+            bit_idx = i % 8
+            if byte_idx < len(h):
+                if (h[byte_idx] >> bit_idx) & 1:
+                    v[i] += 1
+                else:
+                    v[i] -= 1
+
+    # Convert vector to hash
+    simhash = 0
+    for i in range(hash_bits):
+        if v[i] > 0:
+            simhash |= (1 << i)
+
+    # Return as hex string (16 chars for 64-bit)
+    return f"{simhash:016x}"
+
+
+def compute_minhash(text: str, num_perm: int = 128) -> str:
+    """
+    Compute MinHash for semantic similarity (Jaccard estimation).
+
+    Args:
+        text: Input text to hash
+        num_perm: Number of hash permutations (default 128)
+
+    Returns:
+        Comma-separated hex string of MinHash signature values
+    """
+    import hashlib
+    import re
+
+    # Tokenize into shingles (3-grams of words)
+    tokens = re.findall(r'\w+', text.lower())
+    if not tokens:
+        return ",".join(["0"] * num_perm)
+
+    # Create shingles (overlapping 3-grams)
+    shingles = set()
+    for i in range(len(tokens) - 2):
+        shingle = ' '.join(tokens[i:i+3])
+        shingles.add(shingle)
+
+    if not shingles:
+        shingles = set(tokens)  # Fallback to individual tokens
+
+    # MinHash signature
+    signature = [float('inf')] * num_perm
+
+    for shingle in shingles:
+        for i in range(num_perm):
+            # Create unique hash for each permutation
+            h = hashlib.sha256(f"{i}:{shingle}".encode()).digest()
+            hash_val = int.from_bytes(h[:4], 'big')  # Use first 4 bytes as int
+            signature[i] = min(signature[i], hash_val)
+
+    # Convert to hex strings (8 chars for 32-bit ints)
+    hex_values = [f"{int(s):08x}" if s != float('inf') else "00000000" for s in signature]
+    return ",".join(hex_values)
+
+
+def compute_content_hash(snapshot_type: str, source_file: str, field_values: Dict[str, Any]) -> str:
+    """
+    Compute SHA-256 content hash for exact versioning.
+
+    Args:
+        snapshot_type: Type of snapshot
+        source_file: Source file path
+        field_values: Snapshot field values
+
+    Returns:
+        Hex string of SHA-256 hash
+    """
+    import hashlib
+
+    # Create deterministic representation
+    data = f"{snapshot_type}|{source_file}|{json.dumps(field_values, sort_keys=True)}"
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
 class SnapshotBuilder:
     def __init__(self, master_schema: Dict[str, Any]) -> None:
         """
@@ -41,29 +150,73 @@ class SnapshotBuilder:
         self._template_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._preload_templates()
 
+    def _registered_templates(self) -> set:
+        """Return snapshot type names registered in master_schema."""
+        return set(self.master_schema.get("snapshot_templates", {}).keys())
+
+    def _registered_field_ids(self) -> set:
+        """Return all field_ids registered in master_schema field_id_registry."""
+        ids = set()
+        for section in self.master_schema.get("field_id_registry", {}).values():
+            for field in section:
+                ids.add(field["field_id"])
+        return ids
+
+    def _validate_template(self, snapshot_type: str, template: Dict[str, Any]) -> bool:
+        """
+        Validate template against master_schema.
+        Rejects if snapshot_type not registered or any field not in field_id_registry.
+        """
+        registered_types = self._registered_templates()
+        if snapshot_type not in registered_types:
+            self.logger.error(
+                f"Template '{snapshot_type}' rejected: not registered in master_notebook snapshot_templates",
+                extra={"snapshot_type": snapshot_type}
+            )
+            return False
+
+        registered_ids = self._registered_field_ids()
+        unknown_fields = [f for f in template.get("fields", {}) if f not in registered_ids]
+        if unknown_fields:
+            self.logger.error(
+                f"Template '{snapshot_type}' rejected: unregistered fields {unknown_fields}",
+                extra={"snapshot_type": snapshot_type, "unknown_fields": unknown_fields}
+            )
+            return False
+
+        return True
+
     def _preload_templates(self) -> None:
-        """Preload all templates into cache on init."""
+        """Preload all templates into cache on init. Only caches templates validated against master_notebook."""
         if not self.templates_dir.exists():
             self.logger.warning(f"Templates directory not found: {self.templates_dir}")
             return
 
+        loaded = 0
+        rejected = 0
         for template_path in self.templates_dir.glob("*.json"):
             snapshot_type = template_path.stem
             try:
                 with open(template_path, encoding="utf-8") as f:
-                    self._template_cache[snapshot_type] = json.load(f)
-            except Exception as e:
+                    template = json.load(f)
+                if self._validate_template(snapshot_type, template):
+                    self._template_cache[snapshot_type] = template
+                    loaded += 1
+                else:
+                    self._template_cache[snapshot_type] = None
+                    rejected += 1
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
                 self.logger.error(f"Failed to preload template {snapshot_type}: {e}")
                 self._template_cache[snapshot_type] = None
+                rejected += 1
 
-        self.logger.info(f"Preloaded {len(self._template_cache)} templates")
+        self.logger.info(f"Preloaded {loaded} templates, rejected {rejected}")
 
     def _load_template(self, snapshot_type: str) -> Optional[Dict[str, Any]]:
-        """Get template from cache."""
+        """Get template from cache. Only returns templates validated against master_notebook."""
         if snapshot_type in self._template_cache:
             return self._template_cache[snapshot_type]
 
-        # Fallback: load from disk if not cached (shouldn't happen)
         template_path = self.templates_dir / f"{snapshot_type}.json"
 
         if not template_path.exists():
@@ -73,9 +226,12 @@ class SnapshotBuilder:
         try:
             with open(template_path, encoding="utf-8") as f:
                 template = json.load(f)
+            if self._validate_template(snapshot_type, template):
                 self._template_cache[snapshot_type] = template
                 return template
-        except Exception as e:
+            self._template_cache[snapshot_type] = None
+            return None
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             self.logger.error(f"Failed to load template {snapshot_type}: {e}")
             self._template_cache[snapshot_type] = None
             return None
@@ -126,6 +282,12 @@ class SnapshotBuilder:
 
             snapshot_id = str(uuid4())
 
+            # Compute three-layer hashes
+            field_text = json.dumps(fields, sort_keys=True)
+            content_hash = compute_content_hash(snapshot_type, file_path, fields)
+            simhash = compute_simhash(field_text)
+            minhash = compute_minhash(field_text)
+
             self.logger.debug("Attempting snapshot creation", extra={
                 "snapshot_id": snapshot_id,
                 "snapshot_type": snapshot_type,
@@ -141,6 +303,9 @@ class SnapshotBuilder:
                 field_values=fields,
                 snapshot_id=snapshot_id,
                 source_hash=source_hash,
+                content_hash=content_hash,
+                simhash=simhash,
+                minhash=minhash,
             )
 
             snapshot = {
@@ -151,7 +316,7 @@ class SnapshotBuilder:
                 "snapshot_type": snapshot_type,
                 "parsers": parsers_used,
                 "fields": fields,
-                "created_at": snapshot_record.created_at.isoformat() + "Z",
+                "created_at": (snapshot_record.created_at if isinstance(snapshot_record.created_at, str) else snapshot_record.created_at.isoformat() + "Z"),
                 "source_hash": snapshot_record.source_hash,
             }
             
@@ -191,7 +356,7 @@ class SnapshotBuilder:
                 "file_path": record.source_file,
                 "snapshot_type": record.snapshot_type,
                 "fields": record.field_values,
-                "created_at": record.created_at.isoformat() + "Z"
+                "created_at": record.created_at if isinstance(record.created_at, str) else record.created_at.isoformat() + "Z"
             })
         
         self.logger.info("Retrieved file snapshots", extra={
@@ -222,7 +387,7 @@ class SnapshotBuilder:
                 "file_path": record.source_file,
                 "snapshot_type": record.snapshot_type,
                 "fields": record.field_values,
-                "created_at": record.created_at.isoformat() + "Z"
+                "created_at": record.created_at if isinstance(record.created_at, str) else record.created_at.isoformat() + "Z"
             })
         
         self.logger.info("Retrieved project snapshots by type", extra={

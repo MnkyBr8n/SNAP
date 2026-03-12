@@ -213,9 +213,9 @@ class SnapLimitsEnforcer:
             snapshot_count: Number of snapshots created for file
         
         Raises:
-            SnapLimitError: If exceeds max (12)
+            SnapLimitError: If exceeds max (15)
         """
-        max_snapshots = 12  # Max snapshot categories
+        max_snapshots = 15  # Max snapshot categories
         
         if snapshot_count > max_snapshots:
             raise SnapLimitError(

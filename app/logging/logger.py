@@ -118,13 +118,15 @@ def _build_stderr_handler(json_logs: bool) -> logging.Handler:
 
 
 def _build_warning_handler(log_dir: Path) -> logging.Handler:
-    """Build WARNING+ handler → app.log (plain FileHandler, no rotation, VSCode-safe)."""
+    """Build WARNING+ handler → app.log (daily rotation, 24-day retention)."""
     global _shared_warning_handler
     if _shared_warning_handler is not None:
         return _shared_warning_handler
 
     log_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(str(log_dir / "app.log"), encoding='utf-8')
+    handler = logging.handlers.TimedRotatingFileHandler(
+        str(log_dir / "app.log"), when='midnight', backupCount=24, encoding='utf-8', delay=True
+    )
     handler.setLevel(logging.WARNING)
     handler.setFormatter(StructuredFormatter())
     _shared_warning_handler = handler
@@ -132,14 +134,14 @@ def _build_warning_handler(log_dir: Path) -> logging.Handler:
 
 
 def _build_debug_handler(log_dir: Path) -> logging.Handler:
-    """Build INFO+ handler → app_debug.log (RotatingFileHandler, 5 MB × 3)."""
+    """Build INFO+ handler → app_debug.log (daily rotation, 24-day retention)."""
     global _shared_debug_handler
     if _shared_debug_handler is not None:
         return _shared_debug_handler
 
     log_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
-        str(log_dir / "app_debug.log"), maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8'
+    handler = logging.handlers.TimedRotatingFileHandler(
+        str(log_dir / "app_debug.log"), when='midnight', backupCount=24, encoding='utf-8', delay=True
     )
     handler.setLevel(logging.INFO)
     handler.setFormatter(StructuredFormatter())
@@ -285,4 +287,89 @@ def log_file_categorization(
         "size": size,
         "tag": tag,
         "reason": reason
+    })
+
+
+def log_duplicate_detected(
+    logger: StructuredLoggerAdapter,
+    project_id: str,
+    file_path: str,
+    content_hash: str,
+) -> None:
+    """Same header + same content_hash — skip."""
+    logger.info("Duplicate detected: skipping", extra={
+        "event_code": "V002",
+        "project_id": project_id,
+        "file_path": file_path,
+        "content_hash": content_hash,
+    })
+
+
+def log_version_conflict(
+    logger: StructuredLoggerAdapter,
+    project_id: str,
+    file_path: str,
+    prev_content_hash: str,
+    new_content_hash: str,
+    prev_snapshot_id: str,
+    flagged_at: str,
+) -> None:
+    """Same header + different content_hash — version created, old kept for TTL."""
+    logger.warning("Version conflict: new version written, old version in TTL", extra={
+        "event_code": "V003",
+        "project_id": project_id,
+        "file_path": file_path,
+        "prev_content_hash": prev_content_hash,
+        "new_content_hash": new_content_hash,
+        "prev_snapshot_id": prev_snapshot_id,
+        "flagged_at": flagged_at,
+    })
+
+
+def log_header_conflict(
+    logger: StructuredLoggerAdapter,
+    project_id: str,
+    file_path: str,
+    conflicting_sources: list,
+    flagged_at: str,
+) -> None:
+    """Same filename, different source paths, no common parent — requires user auth."""
+    logger.error("Header conflict: user auth required to resolve", extra={
+        "event_code": "P001",
+        "project_id": project_id,
+        "file_path": file_path,
+        "conflicting_sources": conflicting_sources,
+        "flagged_at": flagged_at,
+    })
+
+
+def log_path_warning(
+    logger: StructuredLoggerAdapter,
+    project_id: str,
+    file_path: str,
+    missing_parent: str,
+    flagged_at: str,
+) -> None:
+    """File path has no existing parent in project tree — mkdir required."""
+    logger.warning("Path warning: parent directory does not exist", extra={
+        "event_code": "P002",
+        "project_id": project_id,
+        "file_path": file_path,
+        "missing_parent": missing_parent,
+        "flagged_at": flagged_at,
+    })
+
+
+def log_new_file(
+    logger: StructuredLoggerAdapter,
+    project_id: str,
+    file_path: str,
+    content_hash: str,
+) -> None:
+    """Different header + different content_hash — new file ingested."""
+    logger.info("New file ingested", extra={
+        "event_code": "V001",
+        "project_id": project_id,
+        "file_path": file_path,
+        "content_hash": content_hash,
     })

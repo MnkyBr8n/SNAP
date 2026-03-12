@@ -21,7 +21,6 @@ def _derive_project_id(repo_url: str) -> str:
     name = repo_url.rstrip("/").split("/")[-1]
     if name.endswith(".git"):
         name = name[:-4]
-    name = name.lower().replace("-", "_")
     if len(name) < 3:
         name = name + "_" * (3 - len(name))
     return name
@@ -180,10 +179,14 @@ def cmd_snapshots(project_id: str, snap_type: str | None, file_path: str | None)
         print(f"\n  Use --type <type> or --file <path> to drill in.")
     else:
         # Detail view
-        print(f"  {'FILE':50s}  {'TYPE':20s}  SNAPSHOT_ID")
-        print("  " + "-" * 95)
+        import json
         for r in records:
-            print(f"  {r.source_file[:50]:50s}  {r.snapshot_type:20s}  {r.snapshot_id}")
+            print(f"\n  [{r.snapshot_type}]  {r.source_file}  ({r.snapshot_id})")
+            for field, value in (r.field_values or {}).items():
+                val_str = json.dumps(value, ensure_ascii=False)
+                if len(val_str) > 120:
+                    val_str = val_str[:117] + "..."
+                print(f"    {field}: {val_str}")
 
 
 # =============================================================================
@@ -200,18 +203,29 @@ def cmd_delete_project(project_id: str) -> None:
 
 def cmd_upload_to_staging(project_id: str, source_path: str) -> None:
     from pathlib import Path
-    from app.ingest.local_loader import stage_directory
+    from app.main import startup, process_project
+    from app.ingest.local_loader import stage_directory, get_project_staging_path
+    import shutil
+
+    startup()
 
     source = Path(source_path).resolve()
     if not source.exists():
         print(f"Error: source path does not exist: {source_path}", file=sys.stderr)
         sys.exit(1)
-    if not source.is_dir():
-        print(f"Error: source must be a directory: {source_path}", file=sys.stderr)
-        sys.exit(1)
 
-    count = stage_directory(source, project_id)
-    print(f"Staged {count} files from '{source}' into staging/{project_id}/")
+    staging_path = get_project_staging_path(project_id)
+
+    if source.is_file():
+        staging_path.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, staging_path / source.name)
+        count = 1
+        print(f"Staged 1 file '{source.name}' into staging/{project_id}/")
+    else:
+        count = stage_directory(source, project_id)
+        print(f"Staged {count} files from '{source}' into staging/{project_id}/")
+
+    process_project(project_id=project_id, vendor_id="admin", local_path=staging_path)
 
 
 def cmd_clone_github(repo_url: str) -> None:
@@ -219,20 +233,32 @@ def cmd_clone_github(repo_url: str) -> None:
     from app.ingest.github_cloner import clone_github_repo
 
     startup()
+
     project_id = _derive_project_id(repo_url)
     print(f"Cloning '{repo_url}' as project '{project_id}'...")
 
     clone_github_repo(repo_remote=repo_url, project_id=project_id)
 
-    print(
-        f"Clone complete: project_id='{project_id}'"
-        f"  repos_watcher will ingest automatically."
-    )
+    from app.main import ingest_cloned_repo
+    ingest_cloned_repo(project_id=project_id, vendor_id="admin")
+
+    print(f"Clone and ingest complete: project_id='{project_id}'")
 
 
 # =============================================================================
 # CLI entry point
 # =============================================================================
+
+def cmd_sync(project_id: str) -> None:
+    """Sync project snapshots from SQLite to Postgres."""
+    from app.storage.pg_sync import sync_project
+    startup()
+    print(f"Syncing {project_id} -> Postgres...")
+    stats = sync_project(project_id)
+    print(f"  Runs synced:       {stats['runs_synced']}")
+    print(f"  Snapshots synced:  {stats['snapshots_synced']}")
+    print(f"  Skipped:           {stats['snapshots_skipped']} (already in Postgres)")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -270,6 +296,9 @@ def main() -> None:
     # clone-github
     p_clone = sub.add_parser("clone-github", help="Clone a GitHub repo — repos_watcher ingests automatically.")
     p_clone.add_argument("repo_url", help="GitHub repository URL (https://github.com/owner/repo)")
+
+    p_sync = sub.add_parser("sync", help="Sync project from SQLite to Postgres.")
+    p_sync.add_argument("project_id")
 
     args = parser.parse_args()
 

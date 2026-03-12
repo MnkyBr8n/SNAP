@@ -56,7 +56,7 @@ class ParserLimits(BaseModel):
     
     # Semgrep settings
     semgrep_timeout_per_file: int = Field(default=60, ge=1)    # seconds, single-file mode
-    semgrep_batch_timeout_seconds: int = Field(default=3600, ge=60)  # seconds, batch mode (1 hr default — scales for monorepos)
+    semgrep_batch_timeout_seconds: int = Field(default=120, ge=60)  # seconds, batch mode
     semgrep_code_context_lines: int = Field(default=3, ge=0)
     
     # CSV limits
@@ -73,6 +73,7 @@ class AuthConfig(BaseModel):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 24
+    api_key: str = ""                   # Pre-shared key required to call /auth/token
     github_client_id: str = ""
     github_client_secret: str = ""
     github_allowed_orgs: List[str] = Field(default_factory=list)
@@ -93,8 +94,16 @@ class NetworkPolicy(BaseModel):
         return cleaned
 
 
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SNAP_", case_sensitive=False, env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SNAP_",
+        case_sensitive=False,
+        env_file=str(_ENV_FILE) if _ENV_FILE.exists() else None,
+        extra="ignore",
+    )
 
     # Environment
     environment: str = Field(default="dev")
@@ -114,7 +123,10 @@ class Settings(BaseSettings):
     # Schema reference
     notebook_schema_path: Path = Field(default=Path("app/schemas/master_notebook.yaml"))
 
-    # Database (no default - must be set via SNAP_POSTGRES_DSN env var)
+    # Database configuration
+    db_mode: str = Field(default="postgres", description="Database mode: sqlite, postgres, or dual")
+    use_sqlite: bool = Field(default=True, description="Use SQLite (primary default)")
+
     postgres_dsn: str = Field(
         description="SQLAlchemy-compatible DSN (required, set via SNAP_POSTGRES_DSN)",
     )

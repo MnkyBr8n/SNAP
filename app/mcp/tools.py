@@ -52,21 +52,20 @@ ALLOWED_TOOLS: frozenset[str] = frozenset({
     "list_runs",
     # [REQUIRES EXPLICIT USER APPROVAL per call]
     "get_staging_info",
-    "clone_to_repos",     # clone trigger only — repos_watcher ingests, LLM does not
+    "clone_to_repos",     
     "upload_to_staging",
     "copy_to_staging",
     "clear_staging",
     "kill_task",
 })
 
-# Tools the LLM is never permitted to call — no exceptions, no trust.
 NOT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "delete_project",       # NO DELETE RIGHTS
     "promote_run",          # NO WRITE RIGHTS
     "process_local_project",  # NO PROCESSING
 })
 
-# Actions the LLM is never permitted to perform — enforced by SNAP, not by the LLM.
+
 NOT_ALLOWED_ACTIONS: frozenset[str] = frozenset({
     "read_raw_files",       # LLM never reads raw file content
     "read_github_raw",      # LLM never reads raw GitHub file content
@@ -157,7 +156,6 @@ def _derive_project_id_from_repo(repo_url: str) -> str:
     name = repo_url.rstrip("/").split("/")[-1]
     if name.endswith(".git"):
         name = name[:-4]
-    name = name.lower().replace("-", "_")
     if len(name) < 3:
         name = name + "_" * (3 - len(name))
     return name
@@ -199,8 +197,8 @@ async def handle_clone_to_repos(
         "branch": branch,
     })
 
-    from app.ingest.github_cloner import clone_github_repo
     from app.main import startup
+    from app.ingest.github_cloner import clone_github_repo
 
     startup()
 
@@ -212,10 +210,19 @@ async def handle_clone_to_repos(
             branch=branch,
         )
 
+        import threading
+        from app.main import ingest_cloned_repo
+        t = threading.Thread(
+            target=ingest_cloned_repo,
+            args=(project_id, vendor_id),
+            daemon=True,
+        )
+        t.start()
+
         return xml_response({
             "status": "cloning_complete",
             "project_id": project_id,
-            "message": "Clone finished. SNAP repos_watcher will ingest automatically.",
+            "message": "Clone finished. Ingest started.",
         })
 
     except Exception as e:
@@ -435,6 +442,9 @@ async def handle_upload_to_staging(
     Raises:
         ValidationError: If SNAP staging rejects the file
     """
+    from app.main import startup
+    startup()
+
     project_id = validate_project_id(project_id)
     filename = validate_filename(filename)
 
@@ -487,6 +497,16 @@ async def handle_upload_to_staging(
             f.write(file_content)
     except OSError as e:
         raise ToolError(f"Failed to write file: {e}")
+
+    import threading
+    from app.main import process_project
+    staging_path = get_project_staging_path(project_id)
+    t = threading.Thread(
+        target=process_project,
+        kwargs={"project_id": project_id, "vendor_id": "mcp", "local_path": staging_path},
+        daemon=True,
+    )
+    t.start()
 
     return xml_response({
         "status": "uploaded",
@@ -547,6 +567,9 @@ async def handle_copy_to_staging(
     Returns:
         Copy confirmation with staged file count
     """
+    from app.main import startup
+    startup()
+
     project_id = validate_project_id(project_id)
 
     source = Path(source_path).resolve()
@@ -559,6 +582,16 @@ async def handle_copy_to_staging(
         file_count = stage_directory(source, project_id)
     except Exception as e:
         raise ToolError(f"Failed to stage directory: {e}") from e
+
+    import threading
+    from app.main import process_project
+    staging_path = get_project_staging_path(project_id)
+    t = threading.Thread(
+        target=process_project,
+        kwargs={"project_id": project_id, "vendor_id": "mcp", "local_path": staging_path},
+        daemon=True,
+    )
+    t.start()
 
     logger.info("MCP tool: copy_to_staging", extra={
         "project_id": project_id,
@@ -675,7 +708,7 @@ async def handle_query_snapshots(
                 "snapshot_type": s.snapshot_type,
                 "source_file": s.source_file,
                 "field_values": s.field_values,
-                "created_at": s.created_at.isoformat(),
+                "created_at": s.created_at if isinstance(s.created_at, str) else s.created_at.isoformat(),
             })
 
         return xml_response({

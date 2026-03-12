@@ -1,0 +1,174 @@
+name: Build snap-mcp
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for artifacts (e.g. v1.0.0)'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: snap-mcp-linux-x86_64
+            exe_suffix: ''
+          - os: windows-latest
+            artifact: snap-mcp-windows-x86_64.exe
+            exe_suffix: '.exe'
+          - os: macos-13
+            artifact: snap-mcp-macos-x86_64
+            exe_suffix: ''
+          - os: macos-latest
+            artifact: snap-mcp-macos-arm64
+            exe_suffix: ''
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.artifact }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install nuitka ordered-set
+
+      # ── Linux: system libs needed by some tree-sitter / docling wheels ──
+      - name: Install system libs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y patchelf ccache
+
+      - name: Install ccache (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ccache
+
+      # ── Shared Nuitka flags written to a file so both OS branches can reuse ──
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          python -m nuitka \
+            --onefile \
+            --enable-plugin=pydantic \
+            --include-package=app \
+            --include-package=mcp \
+            --include-package=starlette \
+            --include-package=uvicorn \
+            --include-package=sqlalchemy \
+            --include-package=pydantic \
+            --include-package=pydantic_settings \
+            --include-package=yaml \
+            --include-package=httpx \
+            --include-package=jwt \
+            --include-package=defusedxml \
+            --include-package=bs4 \
+            --include-package=semgrep \
+            --include-package=docling \
+            --include-package=pypdf \
+            --include-package=docx \
+            --include-package=tree_sitter \
+            --include-package=tree_sitter_python \
+            --include-package=tree_sitter_javascript \
+            --include-package=tree_sitter_typescript \
+            --include-package=tree_sitter_java \
+            --include-package=tree_sitter_go \
+            --include-package=tree_sitter_rust \
+            --include-package=tree_sitter_c \
+            --include-package=tree_sitter_cpp \
+            --include-package=tree_sitter_c_sharp \
+            --include-package=tree_sitter_ruby \
+            --include-package=tree_sitter_php \
+            --include-package=tree_sitter_swift \
+            --include-package=tree_sitter_kotlin \
+            --include-package=tree_sitter_scala \
+            --include-package=tree_sitter_json \
+            --include-package=tree_sitter_yaml \
+            --include-package=tree_sitter_xml \
+            --include-data-dir=app/schemas=app/schemas \
+            --python-flag=no_site \
+            --assume-yes-for-downloads \
+            --output-filename=${{ matrix.artifact }} \
+            --output-dir=dist \
+            app/mcp/run.py
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m nuitka `
+            --onefile `
+            --enable-plugin=pydantic `
+            --include-package=app `
+            --include-package=mcp `
+            --include-package=starlette `
+            --include-package=uvicorn `
+            --include-package=sqlalchemy `
+            --include-package=pydantic `
+            --include-package=pydantic_settings `
+            --include-package=yaml `
+            --include-package=httpx `
+            --include-package=jwt `
+            --include-package=defusedxml `
+            --include-package=bs4 `
+            --include-package=semgrep `
+            --include-package=docling `
+            --include-package=pypdf `
+            --include-package=docx `
+            --include-package=tree_sitter `
+            --include-package=tree_sitter_python `
+            --include-package=tree_sitter_javascript `
+            --include-package=tree_sitter_typescript `
+            --include-package=tree_sitter_java `
+            --include-package=tree_sitter_go `
+            --include-package=tree_sitter_rust `
+            --include-package=tree_sitter_c `
+            --include-package=tree_sitter_cpp `
+            --include-package=tree_sitter_c_sharp `
+            --include-package=tree_sitter_ruby `
+            --include-package=tree_sitter_php `
+            --include-package=tree_sitter_swift `
+            --include-package=tree_sitter_kotlin `
+            --include-package=tree_sitter_scala `
+            --include-package=tree_sitter_json `
+            --include-package=tree_sitter_yaml `
+            --include-package=tree_sitter_xml `
+            --include-data-dir=app/schemas=app/schemas `
+            --python-flag=no_site `
+            --assume-yes-for-downloads `
+            --output-filename=${{ matrix.artifact }} `
+            --output-dir=dist `
+            app/mcp/run.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+      # ── Attach to GitHub Release when triggered by a tag push ──
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
+          fail_on_unmatched_files: true

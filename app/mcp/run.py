@@ -41,9 +41,7 @@ def run_stdio():
     from app.main import startup
     from app.mcp.server import server
     from app.logging.logger import get_logger
-    from app.ingest.staging_watcher import start_watcher as start_staging_watcher
-    from app.ingest.repos_watcher import start_watcher as start_repos_watcher
-
+   
     logger = get_logger("mcp.run")
 
     # Initialize SNAP
@@ -54,11 +52,6 @@ def run_stdio():
         logger.error(f"Failed to initialize SNAP: {e}")
         sys.exit(1)
 
-    # Start watchers: staging (local) and repos (GitHub)
-    logger.info("Starting staging watcher (local ingest)...")
-    start_staging_watcher()
-    logger.info("Starting repos watcher (GitHub ingest)...")
-    start_repos_watcher()
 
     logger.info("Starting SNAP MCP server (stdio mode)")
 
@@ -79,8 +72,7 @@ def run_sse(host: str, port: int, log_level: str, reload: bool):
     from app.main import startup
     from app.mcp.server import create_app
     from app.logging.logger import get_logger
-    from app.ingest.staging_watcher import start_watcher as start_staging_watcher
-    from app.ingest.repos_watcher import start_watcher as start_repos_watcher
+    
 
     logger = get_logger("mcp.run")
 
@@ -91,12 +83,6 @@ def run_sse(host: str, port: int, log_level: str, reload: bool):
     except Exception as e:
         logger.error(f"Failed to initialize SNAP: {e}")
         sys.exit(1)
-
-    # Start watchers: staging (local) and repos (GitHub)
-    logger.info("Starting staging watcher (local ingest)...")
-    start_staging_watcher()
-    logger.info("Starting repos watcher (GitHub ingest)...")
-    start_repos_watcher()
 
     logger.info(f"Starting SNAP MCP server on http://{host}:{port}")
     logger.info(f"SSE endpoint: http://{host}:{port}/sse")

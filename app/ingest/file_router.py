@@ -47,7 +47,7 @@ CODE_EXTENSIONS = {
 }
 
 TEXT_EXTENSIONS = {
-    ".pdf", ".txt", ".md", ".docx", ".html", ".rtf"
+    ".pdf", ".txt", ".md", ".docx", ".html", ".rtf", ".jsonl"
 }
 
 CSV_EXTENSIONS = {

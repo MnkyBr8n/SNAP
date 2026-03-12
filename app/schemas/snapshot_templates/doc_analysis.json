@@ -6,12 +6,7 @@
     "doc.entities": [],
     "doc.references": [],
     "doc.related_files": [],
-    "doc.api_endpoints": [],
-    "doc.open_questions": [],
-    "doc.risks": [],
-    "doc.decisions": [],
-    "doc.assumptions": [],
-    "doc.constraints": []
+    "doc.api_endpoints": []
   },
   "always_create": false
 }

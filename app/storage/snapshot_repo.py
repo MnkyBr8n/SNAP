@@ -21,13 +21,13 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from uuid import uuid4
 import yaml
-import json
 
 from sqlalchemy import text
 
 from app.logging.logger import get_logger
 from app.storage.db import db_session, get_engine
 from app.config.settings import get_settings
+from app.extraction.binary_packer import BinaryPacker, BinaryUnpacker
 
 
 class SnapshotRepoError(Exception):
@@ -61,7 +61,7 @@ class SnapshotRecord:
     run_id: str
     project_id: str
     snapshot_type: str
-    source_file: str           # relative path from project root
+    source_file: str
     field_values: Dict[str, Any]
     source_hash: Optional[str]
     created_at: datetime
@@ -71,11 +71,12 @@ class SnapshotRecord:
 _table_ensured = False
 _field_configs_cache: Dict[str, FieldConfig] = {}
 _valid_snapshot_types_cache: set = set()
+_master_schema_cache: dict = {}
 
 
 class SnapshotRepository:
     def __init__(self) -> None:
-        global _table_ensured, _field_configs_cache, _valid_snapshot_types_cache
+        global _table_ensured, _field_configs_cache, _valid_snapshot_types_cache, _master_schema_cache
         self.logger = get_logger("storage.snapshot_repo")
 
         if not _table_ensured:
@@ -86,9 +87,16 @@ class SnapshotRepository:
             self._load_field_configs()
             _field_configs_cache = self.field_configs
             _valid_snapshot_types_cache = self.valid_snapshot_types
+            _master_schema_cache = self.master_schema
         else:
             self.field_configs = _field_configs_cache
             self.valid_snapshot_types = _valid_snapshot_types_cache
+            self.master_schema = _master_schema_cache
+
+        # Build field ID mappings for binary packer/unpacker
+        self.field_name_to_id, self.field_id_to_name = self._build_field_id_maps()
+        self._unpacker = BinaryUnpacker()
+        self._unpacker.set_field_map(self.field_id_to_name)
 
     # =========================================================================
     # Schema loading
@@ -128,10 +136,10 @@ class SnapshotRepository:
         )
 
         with open(schema_path, encoding="utf-8") as f:
-            schema = yaml.safe_load(f)
+            self.master_schema = yaml.safe_load(f)
 
         self.field_configs: Dict[str, FieldConfig] = {}
-        for _stype, fields in schema.get("field_id_registry", {}).items():
+        for _stype, fields in self.master_schema.get("field_id_registry", {}).items():
             for field_def in fields:
                 fid = field_def["field_id"]
                 self.field_configs[fid] = FieldConfig(
@@ -141,173 +149,127 @@ class SnapshotRepository:
                     required=field_def["required"],
                 )
 
+    def _build_field_id_maps(self) -> tuple:
+        """Build field name <-> ID mappings from cached schema."""
+        name_to_id = {}
+        id_to_name = {}
+        field_id = 1
+
+        field_registry = self.master_schema.get("field_id_registry", {})
+        for category in sorted(field_registry.keys()):
+            for field_def in field_registry[category]:
+                field_name = field_def["field_id"]
+                name_to_id[field_name] = field_id
+                id_to_name[field_id] = field_name
+                field_id += 1
+
+        return name_to_id, id_to_name
+
     # =========================================================================
     # DDL — safe to run on every startup
     # =========================================================================
 
+
+    def _get_ddl_for_db(self, is_postgres: bool) -> dict:
+        """Return database-specific DDL types."""
+        return {
+            'timestamp': 'TIMESTAMPTZ' if is_postgres else 'TEXT',
+            'now': 'NOW()' if is_postgres else 'CURRENT_TIMESTAMP',
+            'bytea': 'BYTEA' if is_postgres else 'BLOB',
+        }
+
+
     def _ensure_table(self) -> None:
         engine = get_engine()
-        with engine.connect() as conn:
+        is_postgres = str(engine.url).startswith("postgresql")
+        ddl = self._get_ddl_for_db(is_postgres)
 
-            # -----------------------------------------------------------------
-            # project_runs: one row per processing attempt
-            # -----------------------------------------------------------------
-            conn.execute(text("""
+        with engine.begin() as conn:
+            # PostgreSQL advisory lock only for PostgreSQL
+            if is_postgres:
+                conn.execute(text("SELECT pg_advisory_xact_lock(19700101)"))
+
+            # project_runs table
+            conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS project_runs (
                     run_id        TEXT PRIMARY KEY,
                     project_id    TEXT NOT NULL,
                     ingest_source TEXT NOT NULL DEFAULT 'local',
                     source_ref    TEXT,
                     status        TEXT NOT NULL DEFAULT 'running',
-                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    completed_at  TIMESTAMPTZ,
-                    snapshot_count INT,
-                    file_count     INT
+                    created_at    {ddl['timestamp']} NOT NULL DEFAULT {ddl['now']},
+                    completed_at  {ddl['timestamp']},
+                    snapshot_count INTEGER,
+                    file_count     INTEGER
                 )
             """))
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_runs_project
-                ON project_runs(project_id, status)
-            """))
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_runs_source
-                ON project_runs(project_id, ingest_source, status)
-            """))
 
-            # -----------------------------------------------------------------
-            # project_active_runs: pointer to live run per (project, source)
-            # -----------------------------------------------------------------
-            conn.execute(text("""
+            # project_active_runs table  
+            conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS project_active_runs (
                     project_id    TEXT NOT NULL,
                     ingest_source TEXT NOT NULL,
                     active_run_id TEXT NOT NULL,
-                    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at    {ddl['timestamp']} NOT NULL DEFAULT {ddl['now']},
                     PRIMARY KEY (project_id, ingest_source)
                 )
             """))
 
-            # -----------------------------------------------------------------
-            # snapshot_notebooks
-            # -----------------------------------------------------------------
-            conn.execute(text("""
+            # snapshot_notebooks table
+            conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS snapshot_notebooks (
                     snapshot_id   TEXT PRIMARY KEY,
                     run_id        TEXT NOT NULL,
                     project_id    TEXT NOT NULL,
                     snapshot_type TEXT NOT NULL,
                     source_file   TEXT NOT NULL,
-                    field_values  JSONB NOT NULL,
+                    binary_data   {ddl['bytea']} NOT NULL,
                     source_hash   TEXT,
-                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    content_hash  TEXT,
+                    simhash       BIGINT,
+                    minhash       TEXT,
+                    created_at    {ddl['timestamp']} NOT NULL DEFAULT {ddl['now']}
                 )
             """))
 
-            # -----------------------------------------------------------------
-            # Migration: wire existing rows into legacy runs
-            # -----------------------------------------------------------------
+            # Migrate existing tables: add hash columns if missing
+            try:
+                if is_postgres:
+                    conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN IF NOT EXISTS content_hash TEXT"))
+                    conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN IF NOT EXISTS simhash BIGINT"))
+                    conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN IF NOT EXISTS minhash TEXT"))
+                else:
+                    # SQLite: check columns exist, add if missing
+                    pragma = conn.execute(text("PRAGMA table_info(snapshot_notebooks)")).fetchall()
+                    existing = {row[1] for row in pragma}
+                    if 'binary_data' not in existing:
+                        conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN binary_data BLOB"))
+                    if 'content_hash' not in existing:
+                        conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN content_hash TEXT"))
+                    if 'simhash' not in existing:
+                        conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN simhash BIGINT"))
+                    if 'minhash' not in existing:
+                        conn.execute(text("ALTER TABLE snapshot_notebooks ADD COLUMN minhash TEXT"))
+            except Exception:
+                pass  # Columns already exist
 
-            # Add run_id column to existing tables (no-op if already present)
+            # Indexes for hash-based lookups
             conn.execute(text("""
-                ALTER TABLE snapshot_notebooks
-                ADD COLUMN IF NOT EXISTS run_id TEXT
-            """))
-
-            # Create one 'legacy' run per project that has untagged snapshots
-            conn.execute(text("""
-                INSERT INTO project_runs
-                    (run_id, project_id, ingest_source, status,
-                     source_ref, completed_at)
-                SELECT
-                    gen_random_uuid()::TEXT,
-                    p.project_id,
-                    'legacy',
-                    'active',
-                    'pre-run-tracking',
-                    NOW()
-                FROM (
-                    SELECT DISTINCT sn.project_id
-                    FROM snapshot_notebooks sn
-                    WHERE sn.run_id IS NULL
-                    AND NOT EXISTS (
-                        SELECT 1 FROM project_runs pr
-                        WHERE pr.project_id    = sn.project_id
-                          AND pr.ingest_source = 'legacy'
-                    )
-                ) p
-            """))
-
-            # Tag untagged snapshots with their project's legacy run
-            conn.execute(text("""
-                UPDATE snapshot_notebooks sn
-                SET run_id = pr.run_id
-                FROM (
-                    SELECT DISTINCT ON (project_id) run_id, project_id
-                    FROM project_runs
-                    WHERE ingest_source = 'legacy'
-                    ORDER BY project_id, created_at
-                ) pr
-                WHERE sn.project_id = pr.project_id
-                  AND sn.run_id IS NULL
-            """))
-
-            # Populate active_run pointers for legacy projects
-            conn.execute(text("""
-                INSERT INTO project_active_runs
-                    (project_id, ingest_source, active_run_id)
-                SELECT pr.project_id, pr.ingest_source, pr.run_id
-                FROM project_runs pr
-                WHERE pr.status = 'active'
-                ON CONFLICT (project_id, ingest_source) DO NOTHING
-            """))
-
-            # Backfill run counts for legacy runs
-            conn.execute(text("""
-                UPDATE project_runs pr SET
-                    snapshot_count = sub.snap_count,
-                    file_count     = sub.fc
-                FROM (
-                    SELECT run_id,
-                           COUNT(*)                    AS snap_count,
-                           COUNT(DISTINCT source_file) AS fc
-                    FROM snapshot_notebooks
-                    GROUP BY run_id
-                ) sub
-                WHERE pr.run_id = sub.run_id
-                  AND pr.snapshot_count IS NULL
-            """))
-
-            # -----------------------------------------------------------------
-            # UNIQUE constraint: drop old, add new scoped to run_id
-            # -----------------------------------------------------------------
-            conn.execute(text("""
-                ALTER TABLE snapshot_notebooks DROP CONSTRAINT IF EXISTS
-                snapshot_notebooks_project_id_source_file_snapshot_type_key
+                CREATE INDEX IF NOT EXISTS idx_snapshot_content_hash
+                ON snapshot_notebooks(content_hash)
             """))
             conn.execute(text("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_snapshot_run
-                ON snapshot_notebooks(run_id, source_file, snapshot_type)
-            """))
-
-            # Working indexes
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_snapshot_run
-                ON snapshot_notebooks(run_id)
+                CREATE INDEX IF NOT EXISTS idx_snapshot_simhash
+                ON snapshot_notebooks(simhash)
             """))
             conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_snapshot_type
-                ON snapshot_notebooks(run_id, snapshot_type)
+                CREATE INDEX IF NOT EXISTS idx_snapshot_run_project
+                ON snapshot_notebooks(run_id, project_id)
             """))
             conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS idx_snapshot_project
-                ON snapshot_notebooks(project_id)
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_unique
+                ON snapshot_notebooks(source_file, snapshot_type, content_hash)
             """))
-
-            conn.commit()
-
-    # =========================================================================
-    # Run lifecycle
-    # =========================================================================
 
     def create_run(
         self,
@@ -328,6 +290,7 @@ class SnapshotRepository:
                  "isrc": ingest_source, "sref": source_ref},
             )
         self.logger.info("Run created", extra={
+            "event_code": "R001",
             "run_id": run_id,
             "project_id": project_id,
             "ingest_source": ingest_source,
@@ -343,14 +306,21 @@ class SnapshotRepository:
                 text("""
                     UPDATE project_runs
                     SET status         = 'draft',
-                        completed_at   = NOW(),
+                        completed_at   = CURRENT_TIMESTAMP,
                         snapshot_count = :sc,
                         file_count     = :fc
                     WHERE run_id = :rid
                 """),
                 {"rid": run_id, "sc": snapshot_count, "fc": file_count},
             )
-        return self._get_run(run_id)
+        run = self._get_run(run_id)
+        self.logger.info("Run completed", extra={
+            "event_code": "R002",
+            "run_id": run_id,
+            "snapshot_count": snapshot_count,
+            "file_count": file_count,
+        })
+        return run
 
     def fail_run(self, run_id: str) -> None:
         """Mark run as 'failed'. Its snapshots are never queried."""
@@ -358,90 +328,99 @@ class SnapshotRepository:
             session.execute(
                 text("""
                     UPDATE project_runs
-                    SET status = 'failed', completed_at = NOW()
+                    SET status = 'failed', completed_at = CURRENT_TIMESTAMP
                     WHERE run_id = :rid
                 """),
                 {"rid": run_id},
             )
-        self.logger.warning("Run failed — snapshots isolated", extra={"run_id": run_id})
+        self.logger.warning("Run failed — snapshots isolated", extra={
+            "event_code": "R003",
+            "run_id": run_id,
+        })
 
     def validate_run(self, run_id: str) -> Dict[str, Any]:
         """
-        Compare draft run against current active run for same (project_id, ingest_source).
+        Hash-based validation comparing current run vs previous active run.
 
-        Returns:
-            {passed, critical, warnings, first_ingest, previous_run_id,
-             previous_files, previous_snapshots, new_files, new_snapshots}
-
-        critical=True means file count dropped >50% — auto-promote blocked.
+        Auto-promotes if content_hashes match exactly (no changes detected).
+        Flags for review if hashes differ (content changed).
         """
         run = self._get_run(run_id)
         if not run:
-            return {"passed": False, "critical": True,
-                    "warnings": ["run not found"]}
+            return {"passed": False, "critical": True, "warnings": ["run not found"]}
 
-        with db_session() as session:
-            row = session.execute(
-                text("""
-                    SELECT pr.run_id, pr.file_count, pr.snapshot_count
-                    FROM project_active_runs par
-                    JOIN project_runs pr ON par.active_run_id = pr.run_id
-                    WHERE par.project_id    = :pid
-                      AND par.ingest_source = :isrc
-                """),
-                {"pid": run.project_id, "isrc": run.ingest_source},
-            ).fetchone()
-
-        # First ingest for this project+source — always passes
-        if not row:
+        # Get previous active run for this project + source
+        previous_run = self.get_active_run(run.project_id, run.ingest_source)
+        if not previous_run:
+            # First run - auto-approve
             return {
-                "passed": True, "critical": False, "warnings": [],
-                "first_ingest": True,
+                "passed": True,
+                "critical": False,
+                "warnings": ["first run for this project+source"],
                 "new_files": run.file_count or 0,
                 "new_snapshots": run.snapshot_count or 0,
             }
 
-        prev_run_id, prev_files, prev_snaps = row
-        new_files = run.file_count or 0
-        new_snaps = run.snapshot_count or 0
-        prev_files = prev_files or 0
-        prev_snaps = prev_snaps or 0
+        # Get content_hashes from both runs
+        with db_session() as session:
+            # Previous run hashes
+            prev_hashes_result = session.execute(
+                text("""
+                    SELECT source_file, snapshot_type, content_hash
+                    FROM snapshot_notebooks
+                    WHERE run_id = :rid AND content_hash IS NOT NULL
+                """),
+                {"rid": previous_run.run_id},
+            )
+            prev_hashes = {
+                (row[0], row[1]): row[2]
+                for row in prev_hashes_result.fetchall()
+            }
 
+            # Current run hashes
+            curr_hashes_result = session.execute(
+                text("""
+                    SELECT source_file, snapshot_type, content_hash
+                    FROM snapshot_notebooks
+                    WHERE run_id = :rid AND content_hash IS NOT NULL
+                """),
+                {"rid": run_id},
+            )
+            curr_hashes = {
+                (row[0], row[1]): row[2]
+                for row in curr_hashes_result.fetchall()
+            }
+
+        # Compare
         warnings = []
-        critical = False
+        prev_keys = set(prev_hashes.keys())
+        curr_keys = set(curr_hashes.keys())
 
-        if prev_files > 0:
-            drop = (prev_files - new_files) / prev_files
-            if drop > 0.50:
-                warnings.append(
-                    f"CRITICAL: file count dropped {drop:.0%} "
-                    f"({prev_files} → {new_files})"
-                )
-                critical = True
-            elif drop > 0.20:
-                warnings.append(
-                    f"File count dropped {drop:.0%} "
-                    f"({prev_files} → {new_files})"
-                )
+        new_snapshots = curr_keys - prev_keys
+        deleted_snapshots = prev_keys - curr_keys
+        common_snapshots = prev_keys & curr_keys
 
-        if prev_snaps > 0:
-            drop = (prev_snaps - new_snaps) / prev_snaps
-            if drop > 0.50:
-                warnings.append(
-                    f"Snapshot count dropped {drop:.0%} "
-                    f"({prev_snaps} → {new_snaps})"
-                )
+        changed_snapshots = {
+            key for key in common_snapshots
+            if prev_hashes[key] != curr_hashes[key]
+        }
+
+        if new_snapshots:
+            warnings.append(f"{len(new_snapshots)} new snapshots")
+        if deleted_snapshots:
+            warnings.append(f"{len(deleted_snapshots)} deleted snapshots")
+        if changed_snapshots:
+            warnings.append(f"{len(changed_snapshots)} changed snapshots")
+
+        # Auto-approve if exactly identical
+        critical = bool(new_snapshots or deleted_snapshots or changed_snapshots)
 
         return {
-            "passed": not critical,
+            "passed": True,
             "critical": critical,
             "warnings": warnings,
-            "first_ingest": False,
-            "previous_run_id": prev_run_id,
-            "previous_files": prev_files,
-            "previous_snapshots": prev_snaps,
-            "new_files": new_files,
-            "new_snapshots": new_snaps,
+            "new_files": run.file_count or 0,
+            "new_snapshots": run.snapshot_count or 0,
         }
 
     def promote_run(self, run_id: str) -> ProjectRun:
@@ -472,7 +451,7 @@ class SnapshotRepository:
                 text("""
                     INSERT INTO project_active_runs
                         (project_id, ingest_source, active_run_id, updated_at)
-                    VALUES (:pid, :isrc, :rid, NOW())
+                    VALUES (:pid, :isrc, :rid, CURRENT_TIMESTAMP)
                     ON CONFLICT (project_id, ingest_source)
                     DO UPDATE SET
                         active_run_id = EXCLUDED.active_run_id,
@@ -530,8 +509,8 @@ class SnapshotRepository:
                 "ingest_source": r[1],
                 "source_ref": r[2],
                 "status": r[3],
-                "created_at": r[4].isoformat() + "Z",
-                "completed_at": r[5].isoformat() + "Z" if r[5] else None,
+                "created_at": (r[4] if isinstance(r[4], str) else r[4].isoformat() + "Z"),
+                "completed_at": (r[5] if isinstance(r[5], str) else r[5].isoformat() + "Z") if r[5] else None,
                 "snapshot_count": r[6],
                 "file_count": r[7],
             }
@@ -560,13 +539,15 @@ class SnapshotRepository:
                 return 0
 
             old_ids = [r[0] for r in rows]
+            _id_params = {f"id{i}": v for i, v in enumerate(old_ids)}
+            _in = ",".join(f":id{i}" for i in range(len(old_ids)))
             session.execute(
-                text("DELETE FROM snapshot_notebooks WHERE run_id = ANY(:ids)"),
-                {"ids": old_ids},
+                text(f"DELETE FROM snapshot_notebooks WHERE run_id IN ({_in})"),
+                _id_params,
             )
             session.execute(
-                text("DELETE FROM project_runs WHERE run_id = ANY(:ids)"),
-                {"ids": old_ids},
+                text(f"DELETE FROM project_runs WHERE run_id IN ({_in})"),
+                _id_params,
             )
 
         self.logger.info("Purged old runs", extra={
@@ -574,6 +555,88 @@ class SnapshotRepository:
             "purged": len(old_ids),
         })
         return len(old_ids)
+
+    def delete_run(self, run_id: str) -> Dict[str, Any]:
+        """Delete run and all its snapshots."""
+        run = self._get_run(run_id)
+        if not run:
+            raise SnapshotRepoError(f"Run not found: {run_id}")
+
+        with db_session() as session:
+            snap_count = session.execute(
+                text("DELETE FROM snapshot_notebooks WHERE run_id = :rid RETURNING snapshot_id"),
+                {"rid": run_id}
+            ).rowcount
+
+            session.execute(text("DELETE FROM project_runs WHERE run_id = :rid"), {"rid": run_id})
+            session.execute(
+                text("DELETE FROM project_active_runs WHERE active_run_id = :rid"),
+                {"rid": run_id}
+            )
+
+        self.logger.info("Deleted run", extra={"run_id": run_id, "snapshots_deleted": snap_count})
+        return {"run_id": run_id, "snapshots_deleted": snap_count}
+
+    def delete_snapshot(self, snapshot_id: str) -> Dict[str, Any]:
+        """Delete single snapshot."""
+        with db_session() as session:
+            row = session.execute(
+                text("DELETE FROM snapshot_notebooks WHERE snapshot_id = :sid RETURNING run_id, source_file"),
+                {"sid": snapshot_id}
+            ).fetchone()
+
+        if not row:
+            raise SnapshotRepoError(f"Snapshot not found: {snapshot_id}")
+
+        self.logger.info("Deleted snapshot", extra={"snapshot_id": snapshot_id})
+        return {"snapshot_id": snapshot_id, "run_id": row[0], "source_file": row[1]}
+
+    def revalidate_run(self, run_id: str) -> Dict[str, Any]:
+        """Re-run hash-based validation against previous active run."""
+        validation = self.validate_run(run_id)
+
+        self.logger.info("Revalidated run", extra={"run_id": run_id, "critical": validation.get("critical")})
+        return validation
+
+    def update_snapshot(self, snapshot_id: str, field_values: Dict[str, Any]) -> SnapshotRecord:
+        """Update snapshot binary_data."""
+        # Get snapshot type and hashes for repacking
+        with db_session() as session:
+            existing = session.execute(
+                text("SELECT snapshot_type, content_hash, simhash, minhash FROM snapshot_notebooks WHERE snapshot_id = :sid"),
+                {"sid": snapshot_id}
+            ).fetchone()
+
+            if not existing:
+                raise SnapshotRepoError(f"Snapshot not found: {snapshot_id}")
+
+            # Repack to binary
+            packer = BinaryPacker()
+            packer.set_field_map(self.field_name_to_id)
+
+            content_hash_bytes = bytes.fromhex(existing[1]) if existing[1] else bytes(32)
+            simhash_int = int(existing[2], 16) if existing[2] else 0
+            minhash_list = [int(x, 16) for x in existing[3].split(',')] if existing[3] else [0] * 128
+            snapshot_type_int = hash(existing[0]) % 256
+
+            binary_data = packer.pack(snapshot_type_int, field_values, content_hash_bytes, simhash_int, minhash_list)
+
+            row = session.execute(
+                text("""
+                    UPDATE snapshot_notebooks
+                    SET binary_data = :bd
+                    WHERE snapshot_id = :sid
+                    RETURNING snapshot_id, run_id, project_id, snapshot_type, source_file, source_hash, created_at
+                """),
+                {"sid": snapshot_id, "bd": binary_data}
+            ).fetchone()
+
+        self.logger.info("Updated snapshot", extra={"snapshot_id": snapshot_id})
+        return SnapshotRecord(
+            snapshot_id=row[0], run_id=row[1], project_id=row[2],
+            snapshot_type=row[3], source_file=row[4], field_values=field_values,
+            source_hash=row[5], created_at=row[6]
+        )
 
     # =========================================================================
     # Snapshot write — scoped to run_id
@@ -588,6 +651,9 @@ class SnapshotRepository:
         field_values: Dict[str, Any],
         snapshot_id: Optional[str] = None,
         source_hash: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        simhash: Optional[str] = None,
+        minhash: Optional[str] = None,
     ) -> SnapshotRecord:
         """
         Write one snapshot within a run.
@@ -598,6 +664,20 @@ class SnapshotRepository:
 
         Raises:
             SnapshotRepoError: If snapshot_type not registered in templates.
+        Create or update snapshot for (project_id, source_file, snapshot_type).
+        
+        Each file can have multiple snapshots (one per category).
+        Idempotency: same (project_id, source_file, snapshot_type) will not create duplicates.
+        
+        Args:
+            project_id: unique project identifier
+            snapshot_type: One of 14 categories (file_metadata, imports, etc.)
+            source_file: source file path
+            field_values: Dict with field_id -> value mappings (direct, not wrapped)
+            snapshot_id: Optional pre-generated UUID (for logging correlation)
+        
+        Returns:
+            SnapshotRecord with final state
         """
         # Schema enforcement — single source of truth
         if snapshot_type not in self.valid_snapshot_types:
@@ -610,39 +690,104 @@ class SnapshotRepository:
         if snapshot_id is None:
             snapshot_id = str(uuid4())
 
+        # Pack to binary format
+        packer = BinaryPacker()
+        packer.set_field_map(self.field_name_to_id)
+
+        # Convert hashes to binary format
+        content_hash_bytes = bytes.fromhex(content_hash) if content_hash else bytes(32)
+        simhash_unsigned = int(simhash, 16) if simhash else 0
+        minhash_list = [int(x, 16) for x in minhash.split(',')] if minhash else [0] * 128
+
+        # Map snapshot_type string to int (simple hash for now)
+        snapshot_type_int = hash(snapshot_type) % 256
+
+        binary_data = packer.pack(
+            snapshot_type_int,
+            field_values,
+            content_hash_bytes,
+            simhash_unsigned,
+            minhash_list
+        )
+
+        # Convert unsigned 64-bit to signed for PostgreSQL BIGINT
+        simhash_signed = simhash_unsigned
+        if simhash_unsigned >= 2**63:
+            simhash_signed = simhash_unsigned - 2**64
+
         with db_session() as session:
             result = session.execute(
                 text("""
                     INSERT INTO snapshot_notebooks
                         (snapshot_id, run_id, project_id, snapshot_type,
-                         source_file, field_values, source_hash)
-                    VALUES (:sid, :rid, :pid, :stype, :sf, :fv, :sh)
-                    ON CONFLICT (run_id, source_file, snapshot_type)
-                    DO UPDATE SET
-                        field_values = EXCLUDED.field_values,
-                        source_hash  = EXCLUDED.source_hash
-                    RETURNING snapshot_id, run_id, field_values, source_hash, created_at
+                         source_file, binary_data, source_hash, content_hash, simhash, minhash)
+                    VALUES (:sid, :rid, :pid, :stype, :sf, :bd, :sh, :ch, :simh, :minh)
+                    ON CONFLICT (source_file, snapshot_type, content_hash)
+                    DO NOTHING
+                    RETURNING snapshot_id, run_id, source_hash, content_hash, created_at
                 """),
                 {
                     "sid": snapshot_id, "rid": run_id,
                     "pid": project_id,  "stype": snapshot_type,
                     "sf":  source_file,
-                    "fv":  json.dumps(field_values),
+                    "bd":  binary_data,
                     "sh":  source_hash,
+                    "ch":  content_hash,
+                    "simh": simhash_signed,
+                    "minh": ','.join(str(x) for x in minhash_list),
                 },
             )
             row = result.fetchone()
 
-        self.logger.debug("Upserted snapshot", extra={
-            "snapshot_type": snapshot_type,
-            "source_file": source_file,
-            "run_id": run_id,
-        })
+            if row is None:
+                # Duplicate — file unchanged, update run_id and fetch existing row
+                self.logger.info("Snapshot unchanged", extra={
+                    "event_code": "S002",
+                    "source_file": source_file,
+                    "snapshot_type": snapshot_type,
+                    "content_hash": content_hash,
+                    "run_id": run_id,
+                })
+                session.execute(
+                    text("""
+                        UPDATE snapshot_notebooks SET run_id = :rid
+                        WHERE source_file = :sf
+                          AND snapshot_type = :stype
+                          AND content_hash = :ch
+                    """),
+                    {"rid": run_id, "sf": source_file, "stype": snapshot_type, "ch": content_hash},
+                )
+                row = session.execute(
+                    text("""
+                        SELECT snapshot_id, run_id, source_hash, content_hash, created_at
+                        FROM snapshot_notebooks
+                        WHERE source_file = :sf
+                          AND snapshot_type = :stype
+                          AND content_hash = :ch
+                    """),
+                    {"sf": source_file, "stype": snapshot_type, "ch": content_hash},
+                ).fetchone()
+                if row is None:
+                    self.logger.error("Snapshot fetch after conflict returned nothing", extra={
+                        "event_code": "S003",
+                        "source_file": source_file,
+                        "snapshot_type": snapshot_type,
+                        "content_hash": content_hash,
+                    })
+                    raise RuntimeError(f"S003: snapshot upsert failed for {source_file} / {snapshot_type}")
+            else:
+                self.logger.info("Snapshot inserted", extra={
+                    "event_code": "S001",
+                    "source_file": source_file,
+                    "snapshot_type": snapshot_type,
+                    "run_id": run_id,
+                })
+
         return SnapshotRecord(
             snapshot_id=row[0], run_id=row[1],
             project_id=project_id, snapshot_type=snapshot_type,
-            source_file=source_file, field_values=row[2],
-            source_hash=row[3], created_at=row[4],
+            source_file=source_file, field_values=field_values,
+            source_hash=row[2], created_at=row[4],
         )
 
     # =========================================================================
@@ -676,12 +821,16 @@ class SnapshotRepository:
 
     def _to_record(self, row: Any, project_id: str) -> SnapshotRecord:
         # row columns: snapshot_id, run_id, snapshot_type, source_file,
-        #              field_values, source_hash, created_at
+        #              binary_data, source_hash, created_at
+        try:
+            field_values = self._unpacker.unpack(bytes(row[4]))["field_values"]
+        except Exception:
+            field_values = {}
         return SnapshotRecord(
             snapshot_id=row[0], run_id=row[1],
             project_id=project_id,
             snapshot_type=row[2], source_file=row[3],
-            field_values=row[4], source_hash=row[5], created_at=row[6],
+            field_values=field_values, source_hash=row[5], created_at=row[6],
         )
 
     def get_by_snapshot_id(
@@ -691,7 +840,7 @@ class SnapshotRepository:
             row = session.execute(
                 text("""
                     SELECT snapshot_id, run_id, snapshot_type, source_file,
-                           field_values, source_hash, created_at
+                           binary_data, source_hash, created_at
                     FROM snapshot_notebooks
                     WHERE snapshot_id = :sid AND project_id = :pid
                 """),
@@ -709,15 +858,17 @@ class SnapshotRepository:
             run_ids = self._active_run_ids(session, project_id, ingest_source)
             if not run_ids:
                 return []
+            _rid_params = {f"rid{i}": v for i, v in enumerate(run_ids)}
+            _in = ",".join(f":rid{i}" for i in range(len(run_ids)))
             rows = session.execute(
-                text("""
+                text(f"""
                     SELECT snapshot_id, run_id, snapshot_type, source_file,
-                           field_values, source_hash, created_at
+                           binary_data, source_hash, created_at
                     FROM snapshot_notebooks
-                    WHERE run_id = ANY(:rids)
+                    WHERE run_id IN ({_in})
                     ORDER BY source_file, snapshot_type
                 """),
-                {"rids": run_ids},
+                _rid_params,
             ).fetchall()
         return [self._to_record(r, project_id) for r in rows]
 
@@ -733,14 +884,14 @@ class SnapshotRepository:
             if not run_ids:
                 return []
             rows = session.execute(
-                text("""
+                text(f"""
                     SELECT snapshot_id, run_id, snapshot_type, source_file,
-                           field_values, source_hash, created_at
+                           binary_data, source_hash, created_at
                     FROM snapshot_notebooks
-                    WHERE run_id = ANY(:rids) AND snapshot_type = :stype
+                    WHERE run_id IN ({",".join(f":rid{i}" for i in range(len(run_ids)))}) AND snapshot_type = :stype
                     ORDER BY source_file
                 """),
-                {"rids": run_ids, "stype": snapshot_type},
+                {**{f"rid{i}": v for i, v in enumerate(run_ids)}, "stype": snapshot_type},
             ).fetchall()
         return [self._to_record(r, project_id) for r in rows]
 
@@ -756,14 +907,14 @@ class SnapshotRepository:
             if not run_ids:
                 return []
             rows = session.execute(
-                text("""
+                text(f"""
                     SELECT snapshot_id, run_id, snapshot_type, source_file,
-                           field_values, source_hash, created_at
+                           binary_data, source_hash, created_at
                     FROM snapshot_notebooks
-                    WHERE run_id = ANY(:rids) AND source_file = :sf
+                    WHERE run_id IN ({",".join(f":rid{i}" for i in range(len(run_ids)))}) AND source_file = :sf
                     ORDER BY snapshot_type
                 """),
-                {"rids": run_ids, "sf": source_file},
+                {**{f"rid{i}": v for i, v in enumerate(run_ids)}, "sf": source_file},
             ).fetchall()
         return [self._to_record(r, project_id) for r in rows]
 
@@ -854,8 +1005,8 @@ class SnapshotRepository:
                 "source_ref": r[3],
                 "snapshot_count": r[4],
                 "file_count": r[5],
-                "ingested_at": r[6].isoformat() + "Z",
-                "completed_at": r[7].isoformat() + "Z" if r[7] else None,
+                "ingested_at": (r[6] if isinstance(r[6], str) else r[6].isoformat() + "Z"),
+                "completed_at": (r[7] if isinstance(r[7], str) else r[7].isoformat() + "Z") if r[7] else None,
             })
 
         return list(projects.values())

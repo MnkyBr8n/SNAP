@@ -68,7 +68,7 @@ def validate_project_id(project_id: str) -> str:
     if not project_id:
         raise ValidationError("project_id is required")
 
-    project_id = project_id.strip().lower()
+    project_id = project_id.strip()
 
     if not VALID_PROJECT_ID.match(project_id):
         raise ValidationError(
@@ -316,16 +316,20 @@ def validate_repo_url(repo_url: str) -> str:
 
 def _load_valid_snapshot_types() -> set:
     """
-    Derive valid snapshot types from app/schemas/snapshot_templates/*.json.
-    master_notebook.yaml + snapshot_templates/ are the single source of truth.
-    No hardcoded list — adding a template file makes the type valid automatically.
+    Derive valid snapshot types from master_notebook.yaml snapshot_templates section.
+    Master notebook is the single source of truth — a type is only valid if registered there.
     """
+    import json
     settings = get_settings()
-    templates_dir = settings.schemas_dir / "snapshot_templates"
-    if not templates_dir.exists():
-        # Fallback: empty set causes ValidationError with useful message
+    master_path = settings.schemas_dir / "master_notebook.yaml"
+    if not master_path.exists():
         return set()
-    return {p.stem for p in templates_dir.glob("*.json")}
+    try:
+        with open(master_path, encoding="utf-8") as f:
+            master = json.load(f)
+        return set(master.get("snapshot_templates", {}).keys())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return set()
 
 
 # Cached at import time — reset by restarting the server

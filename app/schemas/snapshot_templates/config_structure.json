@@ -1,0 +1,9 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Config file structural depth and key path analysis",
+  "fields": {
+    "config.structure.nested_paths": [],
+    "config.structure.depth": 0
+  },
+  "always_create": false
+}

@@ -183,7 +183,8 @@ def parse_code_tree_sitter(
     """
     if not TREE_SITTER_AVAILABLE:
         raise ImportError("py-tree-sitter not installed")
-    
+
+    logger.info(f"[TREE_SITTER] START: {path}")
     start_time = time.time()
     
     # Get content
@@ -207,38 +208,39 @@ def parse_code_tree_sitter(
     
     # Parse
     try:
-        tree = parser.parse(bytes(content, "utf8"))
+        content_bytes = bytes(content, "utf8")
+        tree = parser.parse(content_bytes)
         root = tree.root_node
     except Exception as e:
         raise RuntimeError(f"Tree-sitter parsing failed: {e}") from e
-    
+
     # Extract based on language
     lang_key = _map_language_to_grammar(language)
-    
+
     if lang_key == "python":
-        result = _extract_python(root, content, file_path)
+        result = _extract_python(root, content_bytes, file_path)
     elif lang_key in ("typescript", "tsx", "javascript"):
-        result = _extract_typescript(root, content, file_path, lang_key)
+        result = _extract_typescript(root, content_bytes, file_path, lang_key)
     elif lang_key == "go":
-        result = _extract_go(root, content, file_path)
+        result = _extract_go(root, content_bytes, file_path)
     elif lang_key == "java":
-        result = _extract_java(root, content, file_path)
+        result = _extract_java(root, content_bytes, file_path)
     elif lang_key == "rust":
-        result = _extract_rust(root, content, file_path)
+        result = _extract_rust(root, content_bytes, file_path)
     elif lang_key in ("cpp", "c"):
-        result = _extract_cpp(root, content, file_path)
+        result = _extract_cpp(root, content_bytes, file_path)
     elif lang_key == "c_sharp":
-        result = _extract_csharp(root, content, file_path)
+        result = _extract_csharp(root, content_bytes, file_path)
     elif lang_key == "ruby":
-        result = _extract_ruby(root, content, file_path)
+        result = _extract_ruby(root, content_bytes, file_path)
     elif lang_key == "php":
-        result = _extract_php(root, content, file_path)
+        result = _extract_php(root, content_bytes, file_path)
     elif lang_key == "swift":
-        result = _extract_swift(root, content, file_path)
+        result = _extract_swift(root, content_bytes, file_path)
     elif lang_key == "kotlin":
-        result = _extract_kotlin(root, content, file_path)
+        result = _extract_kotlin(root, content_bytes, file_path)
     elif lang_key == "scala":
-        result = _extract_scala(root, content, file_path)
+        result = _extract_scala(root, content_bytes, file_path)
     elif lang_key in ("json", "yaml", "xml"):
         result = _extract_config_structure(
             file_path=file_path,
@@ -267,9 +269,9 @@ def parse_code_tree_sitter(
     return result
 
 
-def _get_node_text(node: Node, source: str) -> str:
-    """Extract text for a node with literal value filtering."""
-    text = source[node.start_byte:node.end_byte]
+def _get_node_text(node: Node, source: bytes) -> str:
+    """Extract text for a node using byte offsets (tree-sitter uses UTF-8 byte positions)."""
+    text = source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
     return _filter_literal_value(text, node.type)
 
 
@@ -352,7 +354,7 @@ def _filter_literal_value(text: str, node_type: str) -> str:
     return text
 
 
-def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_python(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Python-specific fields."""
     result = {
         "code.imports.modules": [],
@@ -365,9 +367,15 @@ def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
         "code.functions.signatures": [],
         "code.functions.async": [],
         "code.functions.decorators": [],
+        "code.content.bodies": {},
+        "code.content.constants": {},
         "code.classes.names": [],
         "code.classes.inheritance": [],
         "code.classes.methods": [],
+        "code.classes.properties": [],
+        "code.classes.decorators": [],
+        "code.classes.method_signatures": [],
+        "code.classes.docstring": [],
     }
     
     def traverse(node: Node):
@@ -383,15 +391,23 @@ def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
         
         elif node.type == "import_from_statement":
             module_name = None
+            is_relative = False
             for child in node.children:
-                if child.type == "dotted_name":
+                if child.type == "relative_import":
+                    is_relative = True
+                    for rc in child.children:
+                        if rc.type == "dotted_name":
+                            module_name = _get_node_text(rc, source)
+                elif child.type == "dotted_name" and module_name is None:
                     module_name = _get_node_text(child, source)
-                    result["code.imports.modules"].append(module_name)
             if module_name:
-                if module_name.startswith('.'):
-                    result["code.imports.internal"].append(module_name)
-                else:
-                    result["code.imports.external"].append(module_name)
+                result["code.imports.modules"].append(module_name)
+            if is_relative:
+                entry = module_name or "."
+                result["code.imports.internal"].append(entry)
+                result["code.imports.from_files"].append(entry)
+            elif module_name:
+                result["code.imports.external"].append(module_name)
         
         # Function definitions
         elif node.type == "function_definition":
@@ -415,6 +431,11 @@ def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
                 sig_text = _get_node_text(node.child_by_field_name("parameters") or node, source)
                 result["code.functions.signatures"].append(f"def {func_name}{sig_text}")
                 
+                # Extract function body
+                body_node = node.child_by_field_name("body")
+                if body_node:
+                    result["code.content.bodies"][func_name] = _get_node_text(body_node, source)
+                
                 if is_async:
                     result["code.functions.async"].append(func_name)
                 
@@ -430,35 +451,86 @@ def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
             class_name = None
             bases = []
             methods = []
-            
+            method_sigs = []
+            decorators = []
+            properties = []
+            docstring = ""
+
             for child in node.children:
                 if child.type == "identifier":
                     class_name = _get_node_text(child, source)
+                elif child.type == "decorator":
+                    decorators.append(_get_node_text(child, source))
                 elif child.type == "argument_list":
-                    # Base classes
                     for arg in child.children:
                         if arg.type == "identifier":
                             bases.append(_get_node_text(arg, source))
                 elif child.type == "block":
-                    # Methods
                     for stmt in child.children:
-                        if stmt.type == "function_definition":
+                        if stmt.type == "expression_statement" and not docstring:
+                            for expr in stmt.children:
+                                if expr.type in ("string", "concatenated_string"):
+                                    raw = _get_node_text(expr, source).strip("\"' \t\n")
+                                    docstring = raw.split("\n")[0].strip()[:200]
+                                    break
+                        elif stmt.type == "function_definition":
+                            method_name = None
                             for method_child in stmt.children:
                                 if method_child.type == "identifier":
-                                    methods.append(_get_node_text(method_child, source))
+                                    method_name = _get_node_text(method_child, source)
+                                    methods.append(method_name)
                                     break
-            
+                            if method_name:
+                                params_node = stmt.child_by_field_name("parameters")
+                                return_node = stmt.child_by_field_name("return_type")
+                                if params_node:
+                                    sig = f"{method_name}{_get_node_text(params_node, source)}"
+                                    if return_node:
+                                        sig += f" -> {_get_node_text(return_node, source)}"
+                                    method_sigs.append(sig)
+                            if method_name == "__init__":
+                                body_node = stmt.child_by_field_name("body")
+                                if body_node:
+                                    for body_stmt in body_node.children:
+                                        if body_stmt.type == "expression_statement":
+                                            for assign in body_stmt.children:
+                                                if assign.type == "assignment":
+                                                    left = assign.child_by_field_name("left")
+                                                    if left and left.type == "attribute":
+                                                        obj = left.child_by_field_name("object")
+                                                        attr = left.child_by_field_name("attribute")
+                                                        if obj and _get_node_text(obj, source) == "self" and attr:
+                                                            properties.append(_get_node_text(attr, source))
+
             if class_name:
                 result["code.classes.names"].append(class_name)
                 if bases:
                     result["code.classes.inheritance"].extend(bases)
                 if methods:
                     result["code.classes.methods"].extend(methods)
-                
+                if method_sigs:
+                    result["code.classes.method_signatures"].extend(method_sigs)
+                if decorators:
+                    result["code.classes.decorators"].extend(decorators)
+                if properties:
+                    result["code.classes.properties"].extend(properties)
+                if docstring:
+                    result["code.classes.docstring"].append(f"{class_name}: {docstring}")
+
                 # Top-level classes are exports
                 if node.parent and node.parent.type == "module":
                     result["code.exports.classes"].append(class_name)
         
+        # Module-level constants
+        elif node.type == "expression_statement":
+            if node.parent and node.parent.type == "module":
+                for child in node.children:
+                    if child.type == "assignment":
+                        name_node = child.child_by_field_name("left")
+                        value_node = child.child_by_field_name("right")
+                        if name_node and name_node.type == "identifier" and value_node:
+                            result["code.content.constants"][_get_node_text(name_node, source)] = _get_node_text(value_node, source)
+
         # Recurse
         for child in node.children:
             traverse(child)
@@ -473,7 +545,7 @@ def _extract_python(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_typescript(root: Node, source: str, file_path: str, lang_key: str) -> Dict[str, Any]:
+def _extract_typescript(root: Node, source: bytes, file_path: str, lang_key: str) -> Dict[str, Any]:
     """Extract TypeScript/JavaScript fields."""
     result = {
         "code.imports.modules": [],
@@ -595,7 +667,7 @@ def _extract_typescript(root: Node, source: str, file_path: str, lang_key: str) 
     return result
 
 
-def _extract_go(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_go(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Go fields."""
     result = {
         "code.file.package": "",
@@ -673,7 +745,7 @@ def _extract_go(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_java(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_java(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Java fields."""
     result = {
         "code.file.package": "",
@@ -747,7 +819,7 @@ def _extract_java(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_rust(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_rust(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Rust fields - basic implementation."""
     result = {
         "code.imports.modules": [],
@@ -781,7 +853,7 @@ def _extract_rust(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_cpp(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_cpp(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract C/C++ fields - basic implementation."""
     result = {
         "code.imports.modules": [],  # #include statements
@@ -816,7 +888,7 @@ def _extract_cpp(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_csharp(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_csharp(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract C# fields - basic implementation."""
     result = {
         "code.file.package": "",  # namespace
@@ -857,7 +929,7 @@ def _extract_csharp(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_ruby(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_ruby(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Ruby fields - basic implementation."""
     result = {
         "code.imports.modules": [],
@@ -894,7 +966,7 @@ def _extract_ruby(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_php(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_php(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract PHP fields - basic implementation."""
     result = {
         "code.file.package": "",  # namespace
@@ -934,7 +1006,7 @@ def _extract_php(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_swift(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_swift(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Swift fields - basic implementation."""
     result = {
         "code.imports.modules": [],
@@ -968,7 +1040,7 @@ def _extract_swift(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_kotlin(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_kotlin(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Kotlin fields - basic implementation."""
     result = {
         "code.file.package": "",
@@ -1008,7 +1080,7 @@ def _extract_kotlin(root: Node, source: str, file_path: str) -> Dict[str, Any]:
     return result
 
 
-def _extract_scala(root: Node, source: str, file_path: str) -> Dict[str, Any]:
+def _extract_scala(root: Node, source: bytes, file_path: str) -> Dict[str, Any]:
     """Extract Scala fields - basic implementation."""
     result = {
         "code.file.package": "",

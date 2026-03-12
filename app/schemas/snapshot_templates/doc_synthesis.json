@@ -1,0 +1,12 @@
+{
+  "parser": "text_extractor",
+  "use_case": "Higher-order reasoning extraction: questions, risks, decisions, assumptions, constraints",
+  "fields": {
+    "doc.questions": [],
+    "doc.risks": [],
+    "doc.decisions": [],
+    "doc.assumptions": [],
+    "doc.constraints": []
+  },
+  "always_create": false
+}

@@ -50,7 +50,7 @@ from app.config.settings import get_settings
 logger = get_logger("mcp.server")
 
 # Create MCP server instance
-server = Server("snap-mcp")
+server = Server("snap")
 
 
 # =============================================================================

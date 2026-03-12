@@ -1,0 +1,10 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Function discovery, bodies, module constants",
+  "fields": {
+    "code.functions.names": [],
+    "code.content.bodies": {},
+    "code.content.constants": {}
+  },
+  "always_create": false
+}

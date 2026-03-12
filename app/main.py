@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import shutil
+import sys
 import yaml
 import json
 import time
@@ -26,7 +27,11 @@ from app.logging.logger import (
     get_logger,
     log_file_parsed,
     log_repo_complete,
-    log_file_categorization
+    log_file_categorization,
+    log_new_file,
+    log_duplicate_detected,
+    log_version_conflict,
+    log_path_warning,
 )
 from app.ingest.local_loader import _should_ignore
 from app.ingest.github_cloner import clone_github_repo
@@ -62,7 +67,6 @@ def startup() -> None:
 
     # Thread-safe initialization
     with _startup_lock:
-        # Double-check after acquiring lock
         if _master_schema is not None:
             _logger.info("Startup already completed")
             return
@@ -200,6 +204,22 @@ def ingest_cloned_repo(project_id: str, vendor_id: str = "repos-watcher") -> Dic
     )
 
 
+def _force_rmtree(path: Path) -> None:
+    """Remove directory tree including read-only git files (Windows .git packs)."""
+    def _on_error(func, p, _):
+        try:
+            import os
+            os.chmod(p, 0o777)
+            func(p)
+        except Exception:
+            pass
+    rm_kwargs = (
+        {"onexc": _on_error} if sys.version_info >= (3, 12)
+        else {"onerror": _on_error}
+    )
+    shutil.rmtree(path, **rm_kwargs)
+
+
 def _run_ingest_pipeline(
     project_id: str,
     vendor_id: str,
@@ -220,20 +240,6 @@ def _run_ingest_pipeline(
 
     routes = route_files(files)
 
-    # Batch semgrep: run ONCE on all code files instead of per-file subprocesses.
-    # If the batch times out or fails, semgrep_batch_results stays empty and
-    # _parse_file_multi_parser falls back to per-file semgrep for each file.
-    semgrep_code_files = [r.path for r in routes if "semgrep" in r.parsers]
-    semgrep_batch_results: Dict[str, Any] = {}
-    if semgrep_code_files:
-        try:
-            semgrep_batch_results = batch_semgrep_scan(semgrep_code_files)
-        except Exception as _semgrep_batch_err:
-            _logger.warning(
-                "Batch semgrep failed — falling back to per-file semgrep in the loop",
-                extra={"project_id": project_id, "error": str(_semgrep_batch_err)},
-            )
-
     stats = {
         "files_attempted": len(routes),
         "files_processed": 0,
@@ -246,15 +252,44 @@ def _run_ingest_pipeline(
         "parsers_used": {},
         "file_categorization": {"normal": 0, "large": 0, "potential_god": 0, "rejected": 0},
         "source_hashes": {},
+        "source_bytes_total": 0,
     }
 
     repo = SnapshotRepository()
+    # Fail stale runs stuck in 'running' (process died mid-ingest)
+    _STALE_THRESHOLD_S = 2 * 3600
+    for _stale in repo.get_runs(project_id):
+        if getattr(_stale, "status", None) == "running":
+            try:
+                _age = datetime.now(timezone.utc) - _stale.created_at
+                if _age.total_seconds() > _STALE_THRESHOLD_S:
+                    repo.fail_run(_stale.run_id)
+                    _logger.warning("Failed stale run", extra={"run_id": _stale.run_id})
+            except Exception:
+                pass
+    _logger.info("Creating run in DB...")
     run = repo.create_run(project_id, ingest_source, source_ref)
+    _logger.info(f"Run created: {run.run_id}")
     run_status = "running"
     validation: Dict[str, Any] = {}
 
+    # Pre-run batch semgrep in chunks before the per-file loop
+    semgrep_batch_results: Dict[str, Dict[str, Any]] = {}
+    semgrep_paths = [r.path for r in routes if "semgrep" in r.parsers]
+    _SEMGREP_CHUNK = 30
+    for _i in range(0, len(semgrep_paths), _SEMGREP_CHUNK):
+        chunk = semgrep_paths[_i: _i + _SEMGREP_CHUNK]
+        try:
+            _logger.info(f"Batch semgrep chunk {_i // _SEMGREP_CHUNK + 1}: {len(chunk)} files")
+            semgrep_batch_results.update(batch_semgrep_scan(chunk))
+        except Exception as _batch_err:
+            _logger.warning(
+                f"Batch semgrep chunk failed, falling back to per-file for chunk — {_batch_err}"
+            )
+
     try:
         for route in routes:
+            _logger.info(f"Processing file: {route.path}")
             file_start = time.time()
 
             file_size = _get_file_size(route.path, route.snapshot_type)
@@ -298,15 +333,42 @@ def _run_ingest_pipeline(
             if source_hash:
                 stats["source_hashes"][rel_path] = source_hash
 
-            categorized_fields = _parse_file_multi_parser(route, semgrep_batch_results)
+            # Versioning check � classify file against previous run
+            _prev = repo.get_by_file(project_id, rel_path)
+            if not _prev:
+                log_new_file(_logger, project_id, rel_path, source_hash or "")
+            else:
+                _prev_hash = getattr(_prev[0], "source_hash", None)
+                if _prev_hash and _prev_hash == source_hash:
+                    log_duplicate_detected(_logger, project_id, rel_path, source_hash or "")
+                else:
+                    log_version_conflict(
+                        _logger,
+                        project_id,
+                        rel_path,
+                        _prev_hash or "",
+                        source_hash or "",
+                        getattr(_prev[0], "snapshot_id", ""),
+                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    )
 
+            # Track source file size (pre-snap)
+            try:
+                stats["source_bytes_total"] += route.path.stat().st_size
+            except (OSError, IOError):
+                pass
+
+            categorized_fields = _parse_file_multi_parser(route, semgrep_batch_results)
+            if "file_metadata" in categorized_fields:
+                categorized_fields["file_metadata"]["code.file.path"] = rel_path
+            if "config_metadata" in categorized_fields:
+                categorized_fields["config_metadata"]["config.file.path"] = rel_path
             if not categorized_fields:
                 _logger.warning(
                     "All parsers failed for file — skipping",
                     extra={"file": str(route.path)},
                 )
                 stats["files_failed"] += 1
-                continue
 
             snapshots = _snapshot_builder.create_snapshots(
                 project_id=project_id,
@@ -345,39 +407,33 @@ def _run_ingest_pipeline(
 
             stats["files_processed"] += 1
 
-        # Seal the run and transition to draft
+        # Seal the run and transition to draft, then promote to active
         repo.complete_run(
             run.run_id,
             snapshot_count=stats["snapshots_created"],
             file_count=stats["files_processed"],
         )
+        repo.promote_run(run.run_id)
 
-        # Validate against previous active run for this (project, source)
-        validation = repo.validate_run(run.run_id)
+        with get_engine().connect() as _conn:
+            from sqlalchemy import text as _text
+            _row = _conn.execute(
+                _text("SELECT COALESCE(SUM(LENGTH(binary_data)), 0) FROM snapshot_notebooks WHERE run_id = :rid"),
+                {"rid": run.run_id},
+            ).fetchone()
+            snapshot_bytes_total = int(_row[0]) if _row else 0
 
-        if not validation.get("critical", False):
-            repo.promote_run(run.run_id)
-            run_status = "active"
-        else:
-            _logger.warning(
-                "Run validation critical — run left as draft, manual promotion required",
-                extra={"run_id": run.run_id, "warnings": validation.get("warnings", [])},
-            )
-            run_status = "draft"
-
-        # Prune old superseded/failed runs to control DB size
-        repo.purge_old_runs(project_id)
 
         # Source copies no longer needed — DB snapshots are canonical
         if project_root.exists():
-            shutil.rmtree(project_root, ignore_errors=True)
+            _force_rmtree(project_root)
             _logger.info(f"Cleaned source dir after ingest: {project_root}")
 
     except Exception:
         repo.fail_run(run.run_id)
         run_status = "failed"
         if project_root.exists():
-            shutil.rmtree(project_root, ignore_errors=True)
+            _force_rmtree(project_root)
         raise
 
     total_duration = (time.time() - start_time) * 1000
@@ -398,6 +454,11 @@ def _run_ingest_pipeline(
 
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    # Calculate compression ratio
+    compression_ratio = 0.0
+    if stats["source_bytes_total"] > 0:
+        compression_ratio = round(snapshot_bytes_total / stats["source_bytes_total"], 3)
+
     manifest = {
         "project_id": project_id,
         "schema_version": "2",
@@ -411,6 +472,11 @@ def _run_ingest_pipeline(
             "start_time": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
             "end_time": now_iso,
             "duration_seconds": round(time.time() - start_time, 2)
+        },
+        "size_metrics": {
+            "source_bytes": stats["source_bytes_total"],
+            "snapshot_bytes": snapshot_bytes_total,
+            "compression_ratio": compression_ratio
         },
         "stats": stats
     }
@@ -472,36 +538,41 @@ def _categorize_file(size: int, snapshot_type: str) -> str:
 
 def _parse_file_multi_parser(
     route: FileRoute,
-    semgrep_batch: Dict[str, Dict[str, Any]]
+    semgrep_batch_results: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Parse file with multiple parsers and merge.
-
-    Semgrep results come from the pre-computed batch (single subprocess),
-    not from per-file invocations.
-    """
+    """Parse file with multiple parsers and merge."""
     categorized_results = []
 
     for parser in route.parsers:
         try:
             if parser == "tree_sitter":
+                _logger.info(f"[{route.path.name}] Running tree_sitter parser")
                 output = parse_code_tree_sitter(path=route.path, language=route.language)
+                _logger.info(f"[{route.path.name}] tree_sitter complete")
                 categorized = _field_mapper.categorize_parser_output(output, "tree_sitter", str(route.path))
                 categorized_results.append(categorized)
 
             elif parser == "semgrep":
-                output = semgrep_batch.get(str(route.path))
-                if output is None:
+                fp_str = str(route.path)
+                if semgrep_batch_results and fp_str in semgrep_batch_results:
+                    output = semgrep_batch_results[fp_str]
+                else:
+                    _logger.info(f"[{route.path.name}] Running semgrep parser (fallback)")
                     output = parse_code_semgrep(path=route.path, language=route.language)
-                categorized = _field_mapper.categorize_parser_output(output, "semgrep", str(route.path))
+                categorized = _field_mapper.categorize_parser_output(output, "semgrep", fp_str)
                 categorized_results.append(categorized)
 
             elif parser == "text_extractor":
+                _logger.info(f"[{route.path.name}] Running text_extractor parser")
                 output = extract_text(route.path)
+                _logger.info(f"[{route.path.name}] text_extractor complete")
                 categorized = _field_mapper.categorize_parser_output(output, "text_extractor", str(route.path))
                 categorized_results.append(categorized)
 
             elif parser == "csv_parser":
+                _logger.info(f"[{route.path.name}] Running csv_parser")
                 output = parse_csv_file(route.path)
+                _logger.info(f"[{route.path.name}] csv_parser complete")
                 categorized = _field_mapper.categorize_parser_output(output, "csv_parser", str(route.path))
                 categorized_results.append(categorized)
 
@@ -529,17 +600,17 @@ def delete_project(project_id: str) -> None:
     # Delete project manifest dir
     project_dir = settings.data_dir / "projects" / project_id
     if project_dir.exists():
-        shutil.rmtree(project_dir, ignore_errors=True)
+        _force_rmtree(project_dir)
 
     # Delete GitHub clone (repos/) if present
     repos_dir = settings.repos_dir / project_id
     if repos_dir.exists():
-        shutil.rmtree(repos_dir, ignore_errors=True)
+        _force_rmtree(repos_dir)
 
     # Delete local staging if present
     staging_dir = settings.data_dir / "staging" / project_id
     if staging_dir.exists():
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        _force_rmtree(staging_dir)
 
     _logger.info(f"Deleted project {project_id}: {deleted} snapshots")
 

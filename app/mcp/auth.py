@@ -11,6 +11,7 @@ JWT authentication and GitHub OAuth for SNAP MCP server.
 
 from __future__ import annotations
 
+import hmac
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -263,6 +264,13 @@ async def issue_token(request: Request):
             {"error": "vendor_id is required (1-64 chars)"},
             status_code=400,
         )
+
+    # Require API key if configured — prevents anyone from freely issuing tokens
+    if settings.auth.api_key:
+        provided_key = body.get("api_key", "").strip()
+        if not provided_key or not hmac.compare_digest(provided_key, settings.auth.api_key):
+            logger.warning("Token issuance rejected: invalid api_key", extra={"vendor_id": vendor_id})
+            return JSONResponse({"error": "Invalid api_key"}, status_code=401)
 
     token = create_jwt(
         vendor_id=vendor_id,

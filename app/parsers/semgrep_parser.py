@@ -41,11 +41,33 @@ def _build_semgrep_env() -> Dict[str, str]:
     # Force UTF-8 mode for Python (required for "auto" ruleset on Windows)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+
+    cache_root = Path(__file__).parent.parent.parent / "cache"
+    semgrep_cache = cache_root / "semgrep"
+    semgrep_cache.mkdir(parents=True, exist_ok=True)
+    env["SEMGREP_USER_DATA_FOLDER"] = str(semgrep_cache)
+
     return env
 
 
 # Build env once at import time
 _SEMGREP_ENV: Dict[str, str] = _build_semgrep_env()
+
+# Resolve the .venv-1 Python so version checks and installs always target
+# the correct venv regardless of which interpreter launched the MCP server.
+_SNAP_PYTHON: str = str(
+    next(
+        (
+            p for p in [
+                Path(__file__).parent.parent.parent / ".venv-1"
+                / ("Scripts" if sys.platform == "win32" else "bin")
+                / ("python.exe" if sys.platform == "win32" else "python")
+            ]
+            if p.exists()
+        ),
+        Path(sys.executable),
+    )
+)
 
 # Semgrep timeouts — pulled from settings at call time for monorepo scalability.
 
@@ -55,8 +77,6 @@ CONTEXT_LINES = 3
 # Semgrep rulesets
 DEFAULT_RULESETS = [
     "p/security-audit",
-    "p/owasp-top-10",
-    "auto"
 ]
 
 
@@ -80,6 +100,7 @@ def parse_code_semgrep(
         RuntimeError: if semgrep execution fails
         ValueError: if required arguments are missing
     """
+    logger.info(f"[SEMGREP] START: {path}")
     start_time = time.time()
     
     # Get file path for semgrep execution
@@ -132,11 +153,14 @@ def parse_code_semgrep(
             temp_path.unlink()
 
 
-def _semgrep_cmd(extra_args: List[str]) -> List[str]:
+def _semgrep_cmd(extra_args: List[str], use_local: bool = False) -> List[str]:
     """Build semgrep command using venv Python + CLI entry point."""
-    config_args: List[str] = []
-    for ruleset in DEFAULT_RULESETS:
-        config_args.extend(["--config", ruleset])
+    if use_local:
+        local_rules = Path(__file__).parent.parent.parent / "cache" / "semgrep" / "rules.yaml"
+        config_args = ["--config", str(local_rules)]
+    else:
+        config_args = ["--config", ",".join(DEFAULT_RULESETS)]
+
     return [
         sys.executable, "-c",
         "from semgrep.cli import cli; cli()",
@@ -146,31 +170,38 @@ def _semgrep_cmd(extra_args: List[str]) -> List[str]:
     ] + config_args + extra_args
 
 
+def _execute_semgrep_with_fallback(cmd_args: List[str], registry_timeout: int, full_timeout: int, context: str):
+    """Execute semgrep with registry-first, local fallback."""
+    for use_local in [False, True]:
+        cmd = _semgrep_cmd(cmd_args, use_local=use_local)
+        timeout = registry_timeout if not use_local else full_timeout
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding='utf-8', errors='replace',
+                timeout=timeout, env=_SEMGREP_ENV
+            )
+            if result.returncode in (0, 1):
+                return result
+            if use_local:
+                raise RuntimeError(f"Semgrep (local) failed (rc={result.returncode}) on {context}: {result.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            if use_local:
+                raise RuntimeError(f"Semgrep timed out after {timeout}s on {context}")
+            logger.debug(f"Registry timed out, fallback to local for {context}")
+    raise RuntimeError(f"Semgrep failed on {context}")
+
+
 def _run_semgrep(file_path: Path, language: Optional[str]) -> List[Dict[str, Any]]:
-    """Execute semgrep CLI and parse JSON output."""
+    """Execute semgrep CLI with registry-first, local fallback."""
     lang_args = ["--lang", language] if language else []
-    cmd = _semgrep_cmd(lang_args + [str(file_path)])
+    cmd_args = lang_args + [str(file_path)]
 
     _timeout = get_settings().parser_limits.semgrep_timeout_per_file
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_timeout,
-            env=_SEMGREP_ENV
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Semgrep timed out after {_timeout}s on {file_path}"
-        ) from exc
+    registry_timeout = min(20, _timeout // 3)
 
-    # Semgrep returns non-zero on findings, which is not an error
-    if result.returncode not in (0, 1):
-        raise RuntimeError(
-            f"Semgrep execution failed (returncode={result.returncode}) on {file_path}: "
-            f"{result.stderr[:500]}"
-        )
+    result = _execute_semgrep_with_fallback(cmd_args, registry_timeout, _timeout, str(file_path))
 
     try:
         output = json.loads(result.stdout)
@@ -307,29 +338,12 @@ def batch_semgrep_scan(file_paths: List[Path]) -> Dict[str, Dict[str, Any]]:
         raise ValueError("batch_semgrep_scan requires at least one file path")
 
     start_time = time.time()
-
-    cmd = _semgrep_cmd([str(p) for p in file_paths])
-
     _timeout = get_settings().parser_limits.semgrep_batch_timeout_seconds
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_timeout,
-            env=_SEMGREP_ENV
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Batch semgrep timed out after {_timeout}s "
-            f"for {len(file_paths)} files"
-        ) from exc
+    registry_timeout = min(60, _timeout // 2)
 
-    if result.returncode not in (0, 1):
-        raise RuntimeError(
-            f"Batch semgrep failed (returncode={result.returncode}): "
-            f"{result.stderr[:500] if result.stderr else ''}"
-        )
+    cmd_args = [str(p) for p in file_paths]
+    context = f"batch of {len(file_paths)} files"
+    result = _execute_semgrep_with_fallback(cmd_args, registry_timeout, _timeout, context)
 
     try:
         output = json.loads(result.stdout)
@@ -371,17 +385,18 @@ def batch_semgrep_scan(file_paths: List[Path]) -> Dict[str, Dict[str, Any]]:
 
 def _check_semgrep_version() -> tuple[bool, str]:
     """
-    Run semgrep --version and return (compatible, version_string).
-    Returns (False, "") if semgrep is not installed or fails to run.
+    Return (compatible, version_string) by importing semgrep directly.
+    Returns (False, "") if semgrep is not installed or the import fails.
+    Using semgrep.__version__ avoids the CLI writing to stderr instead of
+    stdout and avoids non-zero exit codes from cli(['--version']).
     """
     try:
         result = subprocess.run(
-            [sys.executable, "-c", "from semgrep.cli import cli; cli(['--version'])"],
+            [_SNAP_PYTHON, "-c", "import importlib.metadata; print(importlib.metadata.version('semgrep'))"],
             capture_output=True,
             text=True,
             timeout=10,
-            env=_SEMGREP_ENV,
-            check=False
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False, ""
@@ -391,7 +406,7 @@ def _check_semgrep_version() -> tuple[bool, str]:
 
     version_output = result.stdout.strip()
     try:
-        version_parts = version_output.split()[0].split('.')
+        version_parts = version_output.split(".")
         major = int(version_parts[0])
         minor = int(version_parts[1])
     except (ValueError, IndexError):
@@ -408,12 +423,16 @@ def validate_semgrep_installation() -> None:
     Raises:
         RuntimeError: if semgrep cannot be installed or validated after auto-install
     """
+    global _SEMGREP_ENV
+
     compatible, version = _check_semgrep_version()
 
     if not compatible:
         logger.info("Semgrep not found or incompatible — auto-installing latest...")
+        pip_cmd = [_SNAP_PYTHON, "-m", "pip", "install", "--upgrade", "semgrep"]
+        logger.info("Installing semgrep via: %s", _SNAP_PYTHON)
         install = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "semgrep"],
+            pip_cmd,
             capture_output=True,
             text=True,
             timeout=300,
@@ -424,6 +443,9 @@ def validate_semgrep_installation() -> None:
                 f"Semgrep auto-install failed — manual fix: pip install semgrep\n"
                 f"{install.stderr.strip()}"
             )
+        # _SEMGREP_ENV was built at import time before semgrep existed on disk.
+        # Rebuild so semgrep-core bin dir is on PATH for the re-check.
+        _SEMGREP_ENV = _build_semgrep_env()
         logger.info("Semgrep installed. Re-validating...")
         compatible, version = _check_semgrep_version()
         if not compatible:

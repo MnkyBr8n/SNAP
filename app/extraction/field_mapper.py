@@ -236,7 +236,7 @@ def _redact_field_value(field_id: str, value: Any, logger) -> Any:
     return value
 
 
-# 15 snippet categories mapping
+# 16 snippet categories mapping
 SNIPPET_CATEGORIES = {
     "file_metadata": [
         "code.file.path",
@@ -257,10 +257,14 @@ SNIPPET_CATEGORIES = {
         "code.exports.types"
     ],
     "functions": [
-        "code.functions.names",
         "code.functions.signatures",
         "code.functions.async",
         "code.functions.decorators"
+    ],
+    "functions_core": [
+        "code.functions.names",
+        "code.content.bodies",
+        "code.content.constants"
     ],
     "classes": [
         "code.classes.names",
@@ -268,6 +272,11 @@ SNIPPET_CATEGORIES = {
         "code.classes.methods",
         "code.classes.properties",
         "code.classes.interfaces"
+    ],
+    "classes_detail": [
+        "code.classes.decorators",
+        "code.classes.method_signatures",
+        "code.classes.docstring",
     ],
     "connections": [
         "code.connections.depends_on",
@@ -298,13 +307,17 @@ SNIPPET_CATEGORIES = {
         "config.file.path",
         "config.file.format",
         "config.structure.toplevel_keys",
-        "config.structure.nested_paths",
-        "config.structure.depth",
         "config.settings.parameter_names",
         "config.settings.env_vars",
         "config.database.connection_strings",
+    ],
+    "config_structure": [
+        "config.structure.nested_paths",
+        "config.structure.depth",
+    ],
+    "config_api": [
         "config.api.endpoints",
-        "config.api.hosts"
+        "config.api.hosts",
     ],
     "doc_metadata": [
         "doc.title",
@@ -314,10 +327,7 @@ SNIPPET_CATEGORIES = {
         "doc.language"
     ],
     "doc_content": [
-        "doc.summary",
-        "doc.key_concepts",
-        "doc.technical_terms",
-        "doc.acronyms",
+        "doc.sections",
         "doc.urls",
         "doc.code_snippets"
     ],
@@ -327,6 +337,13 @@ SNIPPET_CATEGORIES = {
         "doc.references",
         "doc.related_files",
         "doc.api_endpoints",
+    ],
+    "doc_synthesis": [
+        "doc.questions",
+        "doc.risks",
+        "doc.decisions",
+        "doc.assumptions",
+        "doc.constraints",
     ],
     "csv_schema": [
         "csv.schema.column_names",
@@ -363,20 +380,43 @@ class FieldMapper:
         """
         self.master_schema = master_schema
         self.logger = get_logger("extraction.field_mapper")
-        
+
         # Build allowed field set from schema
         self.allowed_field_ids = self._build_allowed_fields()
-    
+
+        # Build field ID mappings for binary packer
+        self.name_to_id, self.id_to_name = self._build_field_id_maps()
+
     def _build_allowed_fields(self) -> set:
         """Extract all allowed field_ids from master schema."""
         allowed = set()
         field_registry = self.master_schema.get("field_id_registry", {})
-        
+
         for category, fields in field_registry.items():
             for field_def in fields:
                 allowed.add(field_def["field_id"])
-        
+
         return allowed
+
+    def _build_field_id_maps(self) -> tuple:
+        """Build field name <-> ID mappings for binary packer."""
+        name_to_id = {}
+        id_to_name = {}
+        field_id = 1
+
+        field_registry = self.master_schema.get("field_id_registry", {})
+        for category in sorted(field_registry.keys()):
+            for field_def in field_registry[category]:
+                field_name = field_def["field_id"]
+                name_to_id[field_name] = field_id
+                id_to_name[field_id] = field_name
+                field_id += 1
+
+        return name_to_id, id_to_name
+
+    def get_field_id_mappings(self) -> tuple:
+        """Get field name <-> ID mappings for binary packer."""
+        return self.name_to_id, self.id_to_name
     
     def categorize_parser_output(
         self,
