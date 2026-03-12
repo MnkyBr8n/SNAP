@@ -1,21 +1,95 @@
-MIT License
+SNAP MCP SERVER PROPRIETARY LICENSE
 
-Copyright (c) 2025 CLL,LLC  
+Copyright (c) 2026 CLL LLC. All Rights Reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+SNAP (Systematic Network Analysis Platform) MCP Server is proprietary software
+owned exclusively by CLL LLC ("Owner"). This software, including all compiled
+binaries, documentation, architecture, and associated materials (collectively,
+"Software"), is the confidential and proprietary intellectual property of CLL LLC.
+Source code is not distributed and remains a protected trade secret.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+---
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+TERMS AND CONDITIONS
+
+1. GRANT OF RIGHTS
+   No license, right, or permission of any kind is granted to any individual or
+   entity ("User") to use, copy, execute, deploy, integrate, or otherwise exploit
+   this Software without a separate, signed written agreement with CLL LLC.
+
+   Customers who have entered into a signed written agreement with CLL LLC
+   ("Licensed Customers") are granted a limited, non-exclusive, non-transferable,
+   non-sublicensable right to:
+   a. Execute the compiled binary form of the Software on systems authorized
+      in their agreement;
+   b. Integrate the Software with their own internal systems solely as permitted
+      by their agreement.
+
+2. BINARY-ONLY DISTRIBUTION
+   The Software is distributed exclusively in compiled binary form. No source
+   code, intermediate representations, or human-readable implementation details
+   are provided or implied by this license. Receipt of a binary does not convey
+   any rights to the underlying source code or architecture.
+
+3. RESTRICTIONS
+   Without a signed written agreement from CLL LLC, and regardless of whether
+   a binary has been obtained, Users and Licensed Customers are expressly
+   prohibited from:
+   a. Using, executing, or deploying the Software beyond the scope of their
+      agreement;
+   b. Modifying, adapting, translating, or creating derivative works;
+   c. Distributing, sublicensing, selling, or transferring the Software or
+      any portion thereof;
+   d. Reverse engineering, decompiling, disassembling, or using any tool or
+      technique to attempt to recover source code, algorithms, or trade secrets
+      from the compiled binary, regardless of what applicable law may otherwise
+      permit;
+   e. Removing or altering any proprietary notices, labels, or this license.
+
+4. NO IMPLIED LICENSE
+   Nothing in this document, including distribution of a compiled binary or
+   accessibility of any associated materials, shall be construed as an implied,
+   estoppel, or other grant of any license or right beyond what is explicitly
+   stated herein.
+
+5. OWNERSHIP
+   All title, ownership, and intellectual property rights in and to the Software,
+   including all source code, compiled artifacts, algorithms, and trade secrets,
+   remain exclusively with CLL LLC. No rights are transferred to any User or
+   Licensed Customer beyond the limited runtime license explicitly granted in
+   a signed written agreement.
+
+6. DISCLAIMER OF WARRANTIES
+   THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+   FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. CLL LLC DOES NOT WARRANT
+   THAT THE SOFTWARE WILL BE ERROR-FREE OR UNINTERRUPTED.
+
+7. LIMITATION OF LIABILITY
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL CLL LLC
+   BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   DAMAGES (INCLUDING BUT NOT LIMITED TO LOSS OF PROFITS, DATA, OR BUSINESS
+   INTERRUPTION) ARISING OUT OF OR RELATED TO THE USE OR INABILITY TO USE THE
+   SOFTWARE, EVEN IF CLL LLC HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+   CLL LLC'S TOTAL CUMULATIVE LIABILITY SHALL NOT EXCEED THE FEES PAID BY THE
+   LICENSED CUSTOMER IN THE TWELVE (12) MONTHS PRECEDING THE CLAIM.
+
+8. GOVERNING LAW AND JURISDICTION
+   This License shall be governed by and construed in accordance with the laws of
+   the State of California, without regard to conflict of law principles. Any
+   dispute arising under this License shall be subject to the exclusive jurisdiction
+   of the state and federal courts located in Kern County, California.
+
+9. ENFORCEMENT
+   Unauthorized use, modification, distribution, or reverse engineering of this
+   Software constitutes copyright infringement and misappropriation of trade secrets
+   and will be subject to civil and criminal penalties under applicable law,
+   including the California Uniform Trade Secrets Act (Cal. Civ. Code § 3426 et seq.)
+   and the federal Defend Trade Secrets Act (18 U.S.C. § 1836 et seq.).
+
+---
+
+To inquire about licensing:
+CLL LLC
+Bakersfield, California
+cll.automata@outlook.com
