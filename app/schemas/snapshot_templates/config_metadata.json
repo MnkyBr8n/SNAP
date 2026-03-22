@@ -1,0 +1,13 @@
+{
+  "parser": "nim_parser",
+  "use_case": "Configuration file identity, top-level keys, settings, and secrets",
+  "fields": {
+    "config.file.path": null,
+    "config.file.format": null,
+    "config.structure.toplevel_keys": [],
+    "config.settings.parameter_names": [],
+    "config.settings.env_vars": [],
+    "config.database.connection_strings": []
+  },
+  "always_create": false
+}

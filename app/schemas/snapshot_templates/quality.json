@@ -1,0 +1,11 @@
+{
+  "parser": "semgrep",
+  "use_case": "Code quality analysis, technical debt tracking, refactoring targets",
+  "fields": {
+    "code.quality.antipatterns": [],
+    "code.quality.code_smells": [],
+    "code.quality.todos": [],
+    "code.quality.deprecated_usage": []
+  },
+  "always_create": true
+}

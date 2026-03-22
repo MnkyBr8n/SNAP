@@ -1,0 +1,10 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Class API surface, decorator roles, docstring intent",
+  "fields": {
+    "code.classes.decorators": [],
+    "code.classes.method_signatures": [],
+    "code.classes.docstring": []
+  },
+  "always_create": true
+}

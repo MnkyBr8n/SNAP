@@ -1,0 +1,10 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Function signature analysis, async patterns, decorators",
+  "fields": {
+    "code.functions.signatures": [],
+    "code.functions.async": [],
+    "code.functions.decorators": []
+  },
+  "always_create": false
+}

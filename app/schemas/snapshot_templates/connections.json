@@ -1,0 +1,11 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Dependency graph, call graph, refactoring impact analysis",
+  "fields": {
+    "code.connections.depends_on": [],
+    "code.connections.depended_by": [],
+    "code.connections.function_calls": [],
+    "code.connections.instantiates": []
+  },
+  "always_create": false
+}

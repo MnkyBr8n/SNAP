@@ -1,0 +1,11 @@
+{
+  "parser": "tree_sitter",
+  "use_case": "Public API surface, module interface discovery",
+  "fields": {
+    "code.exports.functions": [],
+    "code.exports.classes": [],
+    "code.exports.constants": [],
+    "code.exports.types": []
+  },
+  "always_create": false
+}

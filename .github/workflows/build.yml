@@ -1,0 +1,72 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: snap-mcp-linux
+          - os: macos-latest
+            artifact: snap-mcp-macos-arm64
+          - os: windows-latest
+            artifact: snap-mcp-windows
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e "." pyinstaller semgrep
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y
+          export PATH="$HOME/.nimble/bin:$PATH"
+          nimble install checksums zippy -y
+          nim c -d:release -o:app/parsers/nim_parser app/parsers/nim_parser.nim
+          pyinstaller --onefile \
+            --name snap-mcp \
+            --add-data "app/schemas:app/schemas" \
+            --add-data "app/parsers/nim_parser:app/parsers" \
+            app/mcp/run.py
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install nim -y
+          $nimBin = (Get-ChildItem "C:\tools\Nim" -Recurse -Filter "nim.exe" | Select-Object -First 1).DirectoryName
+          $env:PATH = "$nimBin;$env:USERPROFILE\.nimble\bin;" + $env:PATH
+          nimble install checksums zippy -y
+          nim c -d:release -o:app/parsers/nim_parser.exe app/parsers/nim_parser.nim
+          pyinstaller --onefile `
+            --name snap-mcp `
+            --add-data "app/schemas;app/schemas" `
+            --add-data "app/parsers/nim_parser.exe;app/parsers" `
+            app/mcp/run.py
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/snap-mcp*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

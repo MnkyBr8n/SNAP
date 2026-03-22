@@ -1,0 +1,43 @@
+rules:
+  - id: hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: password = "..."
+          - pattern: api_key = "..."
+          - pattern: secret = "..."
+          - pattern: token = "..."
+    message: Potential hardcoded secret
+    severity: WARNING
+    languages: [python, javascript, typescript, java, go, ruby, php]
+
+  - id: sql-concat
+    pattern: |
+      $SQL = "..." + $VAR
+    message: Potential SQL injection via string concatenation
+    severity: ERROR
+    languages: [python, javascript, typescript, java, php]
+
+  - id: eval-exec
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+    message: Dangerous code execution
+    severity: ERROR
+    languages: [python, javascript, typescript]
+
+  - id: command-injection
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: subprocess.call($CMD, shell=True)
+      - pattern: exec($CMD)
+    message: Potential command injection
+    severity: ERROR
+    languages: [python, javascript, typescript]
+
+  - id: weak-crypto
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+    message: Weak cryptographic hash function
+    severity: WARNING
+    languages: [python]

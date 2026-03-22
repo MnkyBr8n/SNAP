@@ -1,0 +1,150 @@
+schema_id: master_notebook
+schema_version: "1.0"
+
+parser_capabilities:
+  tree_sitter:
+    description: "AST-based code structure parser for detailed syntax analysis"
+    supported_languages: [py, ts, js, java, go, rs, cpp, c, cs, rb, php, swift, kt, scala]
+    fills: [code.file.*, code.imports.*, code.exports.*, code.functions.*, code.content.*, code.classes.*, code.connections.*]
+  semgrep:
+    description: "Static analysis for security and code quality"
+    supported_languages: [py, ts, js, java, go, rs, cpp, c, cs, rb, php, swift, kt, scala, nim]
+    fills: [code.security.*, code.quality.*]
+  nim_parser:
+    description: "PDF, document, and markdown text extraction"
+    supported_formats: [pdf, txt, md, docx, html, rtf, doc,yml, json, xml, toml]
+    fills: [doc.*, config.*]
+  nim_parser:
+    description: "CSV and TSV structured data extraction"
+    supported_formats: [csv, tsv, jsonl, xml]
+    fills: [csv.*]
+
+field_id_registry:
+  file_metadata:
+    - {field_id: code.file.path,     value_type: string,  multi: false, required: true,  parser: tree_sitter}
+    - {field_id: code.file.language, value_type: string,  multi: false, required: true,  parser: tree_sitter}
+    - {field_id: code.file.loc,      value_type: integer, multi: false, required: true, parser: tree_sitter}
+    - {field_id: code.file.package,  value_type: string,  multi: false, required: true, parser: tree_sitter}
+
+  imports:
+    - {field_id: code.imports.modules,    value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.imports.from_files, value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.imports.external,   value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.imports.internal,   value_type: list, multi: true, required: false, parser: tree_sitter}
+
+  exports:
+    - {field_id: code.exports.functions,  value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.exports.classes,    value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.exports.constants,  value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.exports.types,      value_type: list, multi: true, required: false, parser: tree_sitter}
+
+  functions_core:
+    - {field_id: code.functions.names,   value_type: list, multi: true,  required: false, parser: tree_sitter}
+    - {field_id: code.content.bodies,    value_type: dict, multi: false, required: false, parser: tree_sitter, description: "Map of function name to full body source text"}
+    - {field_id: code.content.constants, value_type: dict, multi: false, required: false, parser: tree_sitter}
+
+  functions:
+    - {field_id: code.functions.decorators, value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.functions.signatures, value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.functions.async,      value_type: list, multi: true, required: false, parser: tree_sitter}
+
+  classes:
+    - {field_id: code.classes.names,       value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.classes.inheritance, value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.classes.methods,     value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.classes.properties,  value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.classes.interfaces,  value_type: list, multi: true, required: false, parser: tree_sitter}
+
+  classes_detail:
+    - {field_id: code.classes.method_signatures, value_type: list, multi: true, required: false, parser: tree_sitter}
+    - {field_id: code.classes.decorators,        value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.classes.docstring,         value_type: list, multi: true, required: true, parser: tree_sitter}
+
+  security:
+    - {field_id: code.security.vulnerabilities,     value_type: list, multi: true, required: false, parser: semgrep}
+    - {field_id: code.security.hardcoded_secrets,   value_type: list, multi: true, required: false, parser: semgrep}
+    - {field_id: code.security.sql_injection_risks, value_type: list, multi: true, required: false, parser: semgrep}
+    - {field_id: code.security.xss_risks,           value_type: list, multi: true, required: false, parser: semgrep}
+
+  quality:
+    - {field_id: code.quality.antipatterns,     value_type: list, multi: true, required: true, parser: semgrep}
+    - {field_id: code.quality.code_smells,      value_type: list, multi: true, required: true, parser: semgrep}
+    - {field_id: code.quality.todos,            value_type: list, multi: true, required: true, parser: semgrep}
+    - {field_id: code.quality.deprecated_usage, value_type: list, multi: true, required: true, parser: semgrep}
+
+  connections:
+    - {field_id: code.connections.depends_on,     value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.connections.depended_by,    value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.connections.function_calls, value_type: list, multi: true, required: true, parser: tree_sitter}
+    - {field_id: code.connections.instantiates,   value_type: list, multi: true, required: true, parser: tree_sitter}
+
+  config_metadata:
+    - {field_id: config.file.path,                   value_type: string, multi: false, required: true,  parser: nim_parser}
+    - {field_id: config.file.format,                 value_type: string, multi: false, required: true,  parser: nim_parser, description: "json, yaml, xml"}
+    - {field_id: config.structure.toplevel_keys,     value_type: list,   multi: true,  required: true, parser: nim_parser, description: "Root-level keys in config file"}
+    - {field_id: config.settings.parameter_names,   value_type: list,   multi: true,  required: true, parser: nim_parser, description: "All parameter/setting names found"}
+    - {field_id: config.settings.env_vars,           value_type: list,   multi: true,  required: false, parser: nim_parser, description: "Environment variable references"}
+    - {field_id: config.database.connection_strings, value_type: list,   multi: true,  required: false, parser: nim_parser, description: "Database connection info (redacted secrets)"}
+
+  config_structure:
+    - {field_id: config.structure.nested_paths, value_type: list,    multi: true,  required: false, parser: nim_parser,description: "Maximum nesting depth"}
+    - {field_id: config.structure.key_value_pairs, value_type: list,    multi: true,  required: false, parser: nim_parser, description: "List of all key-value pairs"}
+
+  config_api:
+    - {field_id: config.api.endpoints, value_type: list, multi: true, required: false, parser: nim_parser, description: "API URLs and endpoints"}
+    - {field_id: config.api.hosts,     value_type: list, multi: true, required: false, parser: nim_parser, description: "Host URLs and domains"}
+
+  doc_metadata:
+    - {field_id: doc.title,    value_type: string, multi: false, required: true, parser: nim_parser}
+    - {field_id: doc.author,   value_type: string, multi: false, required: true, parser: nim_parser}
+    - {field_id: doc.date,     value_type: string, multi: false, required: true, parser: nim_parser}
+    - {field_id: doc.version,  value_type: string, multi: false, required: true, parser: nim_parser}
+    - {field_id: doc.language, value_type: string, multi: false, required: true, parser: nim_parser}
+
+  doc_content:
+    - {field_id: doc.urls,          value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.code_snippets, value_type: list, multi: true, required: false, parser: nim_parser}
+    - {field_id: doc.sections,      value_type: list, multi: true, required: true, parser: nim_parser}
+
+  doc_analysis:
+    - {field_id: doc.key_requirements, value_type: list, multi: true, required: false, parser: nim_parser}
+    - {field_id: doc.entities,         value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.references,       value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.related_files,    value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.api_endpoints,    value_type: list, multi: true, required: false, parser: nim_parser}
+
+  doc_synthesis:
+    - {field_id: doc.questions,   value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.risks,       value_type: list, multi: true, required: true, parser: nim_parser}
+    - {field_id: doc.decisions,   value_type: list, multi: true, required: false, parser: nim_parser}
+    - {field_id: doc.assumptions, value_type: list, multi: true, required: false, parser: nim_parser}
+    - {field_id: doc.constraints, value_type: list, multi: true, required: false, parser: nim_parser}
+
+  csv_schema:
+    - {field_id: csv.schema.column_names,  value_type: list,    multi: true,  required: false, parser: nim_parser}
+    - {field_id: csv.schema.column_types,  value_type: list,    multi: true,  required: false, parser: nim_parser, description: "Inferred types: string, integer, float, boolean, date, email, url, array"}
+    - {field_id: csv.schema.column_count,  value_type: integer, multi: false, required: false, parser: nim_parser}
+
+  csv_data:
+    - {field_id: csv.stats.row_count,     value_type: integer, multi: false, required: false, parser: nim_parser}
+    - {field_id: csv.stats.null_counts,   value_type: object,  multi: false, required: false, parser: nim_parser, description: "Count of null/empty values per column"}
+    - {field_id: csv.stats.unique_counts, value_type: object,  multi: false, required: false, parser: nim_parser, description: "Count of unique values per column"}
+    - {field_id: csv.sample.first_rows,   value_type: list,    multi: true,  required: false, parser: nim_parser, description: "First 5 rows as preview"}
+
+selection_rules:
+  choose_text_when:
+    source_kinds: [pdf, txt, md, docx, html, rtf, doc, json, yml, xml, toml]
+  choose_code_when:
+    source_kinds: [py, ts, js, java, go, rs, cpp, c, cs, rb, php, swift, kt, scala, nim]
+  choose_csv_when:
+    source_kinds: [csv, tsv, jsonl, xml]
+
+validation_rules:
+  parser_field_enforcement:
+    enabled: true
+    description: "Enforce that parsers only fill fields they are authorized for"
+    action_on_violation: reject
+  required_field_validation:
+    enabled: true
+    description: "Validate required fields are present"
+    action_on_missing: warn

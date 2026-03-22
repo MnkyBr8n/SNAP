@@ -1,0 +1,9 @@
+{
+  "parser": "nim_parser",
+  "use_case": "API endpoints and hosts referenced in config files",
+  "fields": {
+    "config.api.endpoints": [],
+    "config.api.hosts": []
+  },
+  "always_create": false
+}

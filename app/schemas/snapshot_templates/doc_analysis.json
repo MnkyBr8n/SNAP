@@ -1,0 +1,12 @@
+{
+  "parser": "nim_parser",
+  "use_case": "Requirements analysis, decision tracking, risk identification",
+  "fields": {
+    "doc.key_requirements": [],
+    "doc.entities": [],
+    "doc.references": [],
+    "doc.related_files": [],
+    "doc.api_endpoints": []
+  },
+  "always_create": false
+}
